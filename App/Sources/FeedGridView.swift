@@ -139,7 +139,7 @@ struct FeedGridView: View {
     private func groupedByDay() -> [DayGroup] {
         var groups: [DayGroup] = []
         for asset in feed.items {
-            let date = String(asset.capturedAt.prefix(10))
+            let date = dayKey(of: asset)
             if groups.last?.date == date {
                 groups[groups.count - 1] = DayGroup(
                     date: date, assets: groups[groups.count - 1].assets + [asset]
@@ -166,6 +166,10 @@ struct SelectionBar: View {
     let count: Int
     let showsRestore: Bool
     var canFavourite: Bool = true
+    /// True while a count is being resolved. Trashing is the action that has to wait for
+    /// one, and a destructive button that stays live through a round trip either looks
+    /// broken or gets pressed twice.
+    var isBusy: Bool = false
     let onClear: () -> Void
     var onSelectAll: (() -> Void)?
     let onFavourite: () -> Void
@@ -182,6 +186,7 @@ struct SelectionBar: View {
             if let onSelectAll {
                 Button("Select all", action: onSelectAll).font(.subheadline)
             }
+            if isBusy { ProgressView().controlSize(.small) }
 
             Spacer()
 
@@ -199,6 +204,7 @@ struct SelectionBar: View {
                 }
                 Button(action: onTrash) { Image(systemName: "trash") }
                     .accessibilityLabel("Move to trash")
+                    .disabled(isBusy)
             }
         }
         .padding(.horizontal, 20)

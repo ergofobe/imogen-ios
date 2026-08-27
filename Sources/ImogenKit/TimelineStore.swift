@@ -26,6 +26,10 @@ public final class TimelineStore {
     public private(set) var days: [String: [TimelineTile]] = [:]
     public private(set) var isLoading = true
     public private(set) var error: String?
+    /// Something that went wrong with one action rather than with the screen. A bulk trash
+    /// that the server refused must say so: it is the one destructive thing here, and
+    /// refetching afterwards makes a failure look exactly like a success.
+    public var notice: String?
 
     /// True while somebody is dragging the scrubber. Nothing is fetched then: a flick from
     /// one end of a decade to the other passes through hundreds of days it has no
@@ -38,6 +42,10 @@ public final class TimelineStore {
     private let session: Session
     private var inFlight: Set<String> = []
     private var recency: [String] = []
+    /// Bumped by every refresh, so a day fetched against the library as it was cannot land
+    /// in the one it has become. Without it, trashing everything and refetching leaves the
+    /// day that was already in flight sitting there as a screen of cells that 404.
+    private var generation = 0
 
     /// Roughly two thousand photographs on a typical library, which is more than any
     /// screen shows and few enough to hold without thinking about it.
@@ -52,6 +60,7 @@ public final class TimelineStore {
     public func refresh() async {
         isLoading = true
         error = nil
+        generation += 1
         inFlight.removeAll()
         recency.removeAll()
         days.removeAll()
@@ -83,6 +92,7 @@ public final class TimelineStore {
 
         Task {
             defer { inFlight.remove(date) }
+            let mine = generation
             var collected: [TimelineTile] = []
             var cursor: String?
 
@@ -102,6 +112,7 @@ public final class TimelineStore {
                 return
             }
 
+            guard mine == generation else { return }
             days[date] = collected
             touch(date)
         }
@@ -117,22 +128,27 @@ public final class TimelineStore {
 
     // MARK: - Edits
 
-    public func setFavorite(_ tile: TimelineTile, _ favorite: Bool) {
+    /// By id rather than by tile, because a selection outlives the days it was made in:
+    /// scroll far enough and the tile has been evicted while the id is still ticked. The
+    /// optimistic update is what needs the tile, and it is simply skipped when there is
+    /// none to redraw.
+    public func setFavorite(_ id: String, _ favorite: Bool) {
         // Applied here first and sent afterwards. Pressing the heart should colour it in
         // immediately; waiting for a round trip to a server in somebody's cupboard makes a
         // responsive gesture feel broken.
-        var updated = tile
-        updated.favorite = favorite
-        replaceLocally(updated)
+        let before = loadedTile(id)
+        if var updated = before {
+            updated.favorite = favorite
+            replaceLocally(updated)
+        }
 
         Task {
             do {
-                _ = try await session.client.assets.update(
-                    tile.id, AssetUpdate(favorite: favorite))
+                _ = try await session.client.assets.update(id, AssetUpdate(favorite: favorite))
             } catch {
                 // Put it back the way it was. A heart that stays filled on a server that
                 // refused the change is a lie the interface keeps telling.
-                replaceLocally(tile)
+                if let before { replaceLocally(before) }
             }
         }
     }
@@ -148,20 +164,28 @@ public final class TimelineStore {
 
     /// Archiving takes a photograph out of the timeline entirely — the server leaves
     /// archived ones out of the buckets, so the grid has to lose the cell as well.
-    public func archive(_ tile: TimelineTile) {
-        removeLocally([tile])
+    public func archive(_ id: String) {
+        removeLocally([id])
         Task {
-            _ = try? await session.client.assets.update(tile.id, AssetUpdate(archived: true))
+            do {
+                _ = try await session.client.assets.update(id, AssetUpdate(archived: true))
+            } catch {
+                // The cell is gone and the photograph is not. Only a refetch puts the grid
+                // back in step with the library.
+                await refresh()
+            }
         }
     }
 
-    public func trash(_ tiles: [TimelineTile]) {
-        guard !tiles.isEmpty else { return }
-        removeLocally(tiles)
+    public func trash(_ ids: Set<String>) {
+        guard !ids.isEmpty else { return }
+        let removed = removeLocally(ids)
         Task {
             do {
-                _ = try await session.client.assets.trash(
-                    AssetSelection(assetIds: tiles.map(\.id)))
+                _ = try await session.client.assets.trash(AssetSelection(assetIds: Array(ids)))
+                // Anything whose day had been evicted was trashed on the server but never
+                // taken out of the index, which is now counting photographs that are gone.
+                if removed < ids.count { await refresh() }
             } catch {
                 // The grid is now lying about what is on the server. Only a refetch can
                 // put that right, and it is better than leaving a hole where a photograph
@@ -196,11 +220,23 @@ public final class TimelineStore {
 
     /// Trashes everything the filter matches. Only ever called behind a confirmation that
     /// states the count from `resolvedCount(except:)`.
+    ///
+    /// The refetch afterwards would hide a refusal perfectly — the grid empties or does
+    /// not, and either looks deliberate — so a failure is said out loud.
     public func trashEverything(except excluded: Set<String>) {
         Task {
-            _ = try? await session.client.assets.trash(everything(except: excluded))
+            do {
+                _ = try await session.client.assets.trash(everything(except: excluded))
+            } catch {
+                notice = (error as? ImogenError)?.message
+                    ?? "Those could not be moved to the trash."
+            }
             await refresh()
         }
+    }
+
+    private func loadedTile(_ id: String) -> TimelineTile? {
+        days.values.lazy.compactMap { $0.first { $0.id == id } }.first
     }
 
     private func replaceLocally(_ tile: TimelineTile) {
@@ -211,17 +247,21 @@ public final class TimelineStore {
         days[date] = day
     }
 
-    private func removeLocally(_ tiles: [TimelineTile]) {
-        let ids = Set(tiles.map(\.id))
+    /// Takes ids out of whatever days are loaded, and tells the caller how many it found.
+    /// A day that has been evicted holds none of them, so the count is how much of the
+    /// index could be corrected without going back to the server.
+    @discardableResult
+    private func removeLocally(_ ids: Set<String>) -> Int {
         var perDay: [String: Int] = [:]
-        for tile in tiles {
-            perDay[dayKey(of: tile), default: 0] += 1
+        for (date, tiles) in days {
+            let remaining = tiles.filter { !ids.contains($0.id) }
+            guard remaining.count != tiles.count else { continue }
+            perDay[date] = tiles.count - remaining.count
+            days[date] = remaining
         }
 
         index = index.removing(perDay)
-        for (date, _) in perDay {
-            days[date] = days[date]?.filter { !ids.contains($0.id) }
-        }
+        return perDay.values.reduce(0, +)
     }
 
     private func describe(_ error: Error) -> String {

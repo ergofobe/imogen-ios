@@ -33,6 +33,11 @@ struct TimelineView: View {
     /// The count a by-query trash resolved to, and what puts its confirmation on screen.
     /// Set only once the server has been asked, so the question always names a number.
     @State private var trashCount: Int?
+    /// The exclusions the count was resolved against, kept so that the confirmation and
+    /// the deletion are the same set. The grid stays live during the round trip and a tap
+    /// on a cell would otherwise move the goalposts between the question and the answer.
+    @State private var trashExcept: Set<String> = []
+    @State private var resolvingTrash = false
     /// The day at the top of the viewport, which is what the thumb draws itself against.
     @State private var topDay = 0
     /// The height of the grid, so the rail knows how much of the timeline is on screen.
@@ -70,9 +75,9 @@ struct TimelineView: View {
                 tiles: store.days[dayKey(of: tile)] ?? [tile],
                 initial: tile,
                 mode: .library,
-                onFavorite: store.setFavorite,
-                onArchive: { store.archive($0) },
-                onTrash: { store.trash([$0]) },
+                onFavorite: { store.setFavorite($0.id, $1) },
+                onArchive: { store.archive($0.id) },
+                onTrash: { store.trash([$0.id]) },
                 onRestore: { _ in },
                 onDetails: { details = $0 }
             )
@@ -89,10 +94,19 @@ struct TimelineView: View {
             titleVisibility: .visible
         ) {
             Button("Move to trash", role: .destructive) {
-                store.trashEverything(except: unpicked)
+                store.trashEverything(except: trashExcept)
                 clearSelection()
             }
             Button("Cancel", role: .cancel) {}
+        }
+        .alert(
+            store.notice ?? "",
+            isPresented: .init(
+                get: { store.notice != nil },
+                set: { if !$0 { store.notice = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
         }
     }
 
@@ -194,10 +208,11 @@ struct TimelineView: View {
                         // selection would mean a request per photograph. Offering the
                         // heart there would be offering ninety thousand round trips.
                         canFavourite: !selectingAll,
+                        isBusy: resolvingTrash,
                         onClear: clearSelection,
                         onSelectAll: selectingAll ? nil : { selectingAll = true; picked = [] },
                         onFavourite: {
-                            for tile in pickedTiles() { store.setFavorite(tile, true) }
+                            for id in picked { store.setFavorite(id, true) }
                             clearSelection()
                         },
                         onAddToAlbum: onAddToAlbum.map { add in
@@ -208,13 +223,25 @@ struct TimelineView: View {
                         },
                         onTrash: {
                             guard selectingAll else {
-                                store.trash(pickedTiles())
+                                store.trash(picked)
                                 clearSelection()
                                 return
                             }
                             // Asked before it is offered. Nothing is trashed until the
-                            // count comes back and somebody agrees to it.
-                            Task { trashCount = await store.resolvedCount(except: unpicked) }
+                            // count comes back and somebody agrees to it — against the
+                            // exclusions as they were when the button was pressed.
+                            let except = unpicked
+                            resolvingTrash = true
+                            Task {
+                                let count = await store.resolvedCount(except: except)
+                                resolvingTrash = false
+                                guard count > 0 else {
+                                    clearSelection()
+                                    return
+                                }
+                                trashExcept = except
+                                trashCount = count
+                            }
                         },
                         onRestore: {}
                     )
@@ -282,10 +309,6 @@ struct TimelineView: View {
         selectingAll = false
         picked = []
         unpicked = []
-    }
-
-    private func pickedTiles() -> [TimelineTile] {
-        store.days.values.flatMap { $0 }.filter { picked.contains($0.id) }
     }
 }
 

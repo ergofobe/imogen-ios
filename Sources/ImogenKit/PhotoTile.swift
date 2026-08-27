@@ -16,16 +16,26 @@ public protocol PhotoTile: Identifiable, Sendable {
     var type: AssetType { get }
     var favorite: Bool { get }
     var placeholderColor: String? { get }
-    /// What VoiceOver reads. A tile has no filename to fall back on, so it says what it is.
+    /// What VoiceOver reads. A tile has no filename, so it is named by when it was taken —
+    /// forty thousand cells all reading "Photograph" is a grid nobody can move through.
     var spokenLabel: String { get }
+    /// The whole asset, when this already is one. A feed holds assets and the viewer should
+    /// not refetch what it was handed; only a tile has to go and ask.
+    var fullAsset: Asset? { get }
 }
 
 extension TimelineTile: PhotoTile {
-    public var spokenLabel: String { type == .video ? "Video" : "Photograph" }
+    public var spokenLabel: String {
+        type == .video ? "Video, \(fullDate(capturedAt))" : fullDate(capturedAt)
+    }
+
+    public var fullAsset: Asset? { nil }
 }
 
 extension Asset: PhotoTile {
     public var spokenLabel: String { description ?? originalFilename }
+
+    public var fullAsset: Asset? { self }
 }
 
 /// The day a photograph belongs to, which is the key its grid section is filed under.

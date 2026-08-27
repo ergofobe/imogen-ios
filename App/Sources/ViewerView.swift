@@ -36,6 +36,11 @@ struct ViewerView<Tile: PhotoTile>: View {
         tiles.first { $0.id == current } ?? tiles.first
     }
 
+    /// The photograph the chrome is describing. Not `current`: trashing the one on screen
+    /// shortens the list and `tile` falls back to the first, while `current` still names
+    /// the photograph that has gone.
+    private var shownId: String { tile?.id ?? "" }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -77,10 +82,17 @@ struct ViewerView<Tile: PhotoTile>: View {
         // Every photograph deleted from underneath the pager shortens the list. Closing
         // when it empties is the only sensible end to that.
         .onChange(of: tiles.isEmpty) { _, empty in if empty { dismiss() } }
-        .task(id: current) {
-            guard !current.isEmpty else { return }
+        .task(id: shownId) {
+            guard !shownId.isEmpty else { return }
+            // A feed was handed whole assets and is holding this one already. Asking the
+            // server for what is in the array above would be a round trip and a blank
+            // title bar on five screens that used to draw instantly.
+            if let already = tile?.fullAsset {
+                loaded = already
+                return
+            }
             loaded = nil
-            loaded = try? await session.client.assets.get(current)
+            loaded = try? await session.client.assets.get(shownId)
         }
     }
 
