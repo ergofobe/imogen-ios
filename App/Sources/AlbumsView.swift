@@ -30,13 +30,17 @@ final class AlbumsStore {
         isLoading = false
     }
 
-    func create(_ name: String, with assetIds: [String]? = nil) {
+    /// A new album, and — if there is one — whatever was selected put straight into it.
+    ///
+    /// The album is created empty and filled in a second request rather than through
+    /// `AlbumCreate.assetIds`, because a selection can be a query and that field cannot
+    /// carry one. One shape for both instead of a list-only shortcut and a fallback.
+    func create(_ name: String, with selection: AssetSelection? = nil) {
         Task {
-            guard let album = try? await session.client.albums.create(
-                AlbumCreate(name: name, assetIds: assetIds)
-            ) else { return }
+            guard let album = try? await session.client.albums.create(AlbumCreate(name: name))
+            else { return }
             albums.append(album)
-            if assetIds != nil { notice = "Added to \(album.name)" }
+            if let selection { add(selection, to: album) }
         }
     }
 
@@ -62,10 +66,14 @@ final class AlbumsStore {
 
     /// Adding is idempotent server-side, and the result says what actually changed — so a
     /// photograph already in the album is reported as skipped rather than as added twice.
-    func add(_ assetIds: [String], to album: Album) {
+    ///
+    /// A selection rather than a list of ids: adding a year of photographs to an album
+    /// should be the query the person was looking at, not forty thousand uuids uploaded to
+    /// say what the server could work out itself.
+    func add(_ selection: AssetSelection, to album: Album) {
         Task {
             do {
-                let result = try await session.client.albums.addAssets(album.id, assetIds)
+                let result = try await session.client.albums.addAssets(album.id, selection)
                 if let position = albums.firstIndex(where: { $0.id == album.id }) {
                     albums[position].assetCount = result.assetCount
                 }

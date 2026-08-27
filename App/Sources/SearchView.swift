@@ -11,7 +11,7 @@ import SwiftUI
 struct SearchView: View {
     let session: Session
     let columns: Int
-    var onAddToAlbum: (([String]) -> Void)?
+    var onAddToAlbum: ((AssetSelection) -> Void)?
 
     @State private var text = ""
     @State private var type: AssetType?

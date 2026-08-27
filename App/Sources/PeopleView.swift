@@ -166,74 +166,43 @@ struct PersonFace: View {
     }
 }
 
-/// One person's photographs.
+/// One person's photographs, which is an ordinary timeline with a filter on it.
 ///
-/// The people endpoint hands back a person with their photographs attached rather than a
-/// cursor-paged query, so there is nothing here to page through — and pretending otherwise
-/// would mean an `AssetQuery` filter the API does not have.
+/// It used to be `people.get(id).photos`. That endpoint caps at five hundred and selects
+/// with no ordering, so somebody with three thousand photographs got an arbitrary five
+/// hundred in uuid order — which, grouped by day, reads as scattered noise rather than as a
+/// life. `personId` on the filter makes this the same screen as the library's own, and it
+/// gets the day headings, the rail and the windowing for nothing.
 struct PersonDetailView: View {
     let session: Session
     let person: Person
     let columns: Int
+    var onAddToAlbum: ((AssetSelection) -> Void)?
 
-    @State private var photos: [Asset]?
-    @State private var opened: Asset?
-    @State private var details: Asset?
+    @State private var store: TimelineStore?
 
     var body: some View {
         Group {
-            if let photos {
-                if photos.isEmpty {
-                    ContentUnavailableView(
-                        "No photographs",
-                        systemImage: "photo",
-                        description: Text("Nothing here is grouped under this person.")
-                    )
-                } else {
-                    ScrollView {
-                        LazyVGrid(
-                            columns: Array(
-                                repeating: GridItem(.flexible(), spacing: 2), count: columns
-                            ),
-                            spacing: 2
-                        ) {
-                            ForEach(photos) { asset in
-                                PhotoCell(
-                                    session: session, asset: asset,
-                                    selected: false, selecting: false
-                                ) {
-                                    opened = asset
-                                } onLongPress: {}
-                            }
-                        }
-                        .padding(.horizontal, 2)
-                    }
-                }
+            if let store {
+                TimelineView(
+                    session: session,
+                    store: store,
+                    columns: columns,
+                    onAddToAlbum: onAddToAlbum,
+                    emptyTitle: "No photographs",
+                    emptyBody: "Nothing here is grouped under this person."
+                )
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         .navigationTitle(person.name ?? "Unnamed")
-        .task(id: person.id) {
-            photos = (try? await session.client.people.get(person.id).photos) ?? []
-        }
-        .fullScreenCover(item: $opened) { asset in
-            ViewerView(
-                session: session,
-                assets: photos ?? [asset],
-                initial: asset,
-                mode: .library,
-                // Editing from here would need the list refetching to stay honest, and a
-                // person's page is somewhere you look rather than somewhere you tidy.
-                onFavorite: { _, _ in },
-                onArchive: { _ in },
-                onTrash: { _ in },
-                onRestore: { _ in },
-                onDetails: { details = $0 }
-            )
-        }
-        .sheet(item: $details) { asset in
-            DetailsView(asset: asset) { _ in }
+        .onAppear {
+            if store == nil {
+                store = TimelineStore(
+                    session: session, filter: AssetFilter(personId: person.id)
+                )
+            }
         }
     }
 }

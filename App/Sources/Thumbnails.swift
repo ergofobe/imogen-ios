@@ -88,9 +88,13 @@ extension UIImage {
 /// The placeholder is the asset's own colour, which the server computed when it made the
 /// thumbnail. A grid of grey rectangles resolving into photographs looks like a page
 /// failing to load; a grid of the right colours looks like the photographs arriving.
+///
+/// An id and a colour rather than an `Asset`, because a tile carries both and an asset is
+/// far more than this needs to draw.
 struct AssetImage: View {
     let session: Session
-    let asset: Asset
+    let assetId: String
+    var placeholderColor: String?
     var variant: String = "thumbnail"
     var contentMode: ContentMode = .fill
 
@@ -115,16 +119,16 @@ struct AssetImage: View {
     }
 
     private var placeholder: some View {
-        (asset.placeholderColor.flatMap(Color.init(hex:)) ?? Color.secondary.opacity(0.2))
+        (placeholderColor.flatMap(Color.init(hex:)) ?? Color.secondary.opacity(0.2))
             .ignoresSafeArea(edges: [])
     }
 
     // Two accounts can hold the same asset id. Without the account in the key the cache
     // would answer one server's request with the other's photograph.
-    private var cacheKey: String { "\(session.accountId):\(asset.id):\(variant)" }
+    private var cacheKey: String { "\(session.accountId):\(assetId):\(variant)" }
 
     private func load() async {
-        guard let url = session.assetURL(asset.id, variant: variant) else { return }
+        guard let url = session.assetURL(assetId, variant: variant) else { return }
         let loaded = await ThumbnailCache.shared.image(for: url, key: cacheKey, session: session)
         withAnimation(.easeOut(duration: 0.15)) { image = loaded }
     }

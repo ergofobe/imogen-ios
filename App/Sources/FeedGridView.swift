@@ -14,7 +14,7 @@ struct FeedGridView: View {
     var mode: ViewerMode = .library
     var emptyTitle: String = "Nothing here yet"
     var emptyBody: String = "Photographs will appear here once there are some."
-    var onAddToAlbum: (([String]) -> Void)?
+    var onAddToAlbum: ((AssetSelection) -> Void)?
 
     @State private var selection: Set<String> = []
     @State private var opened: Asset?
@@ -45,7 +45,7 @@ struct FeedGridView: View {
         .fullScreenCover(item: $opened) { asset in
             ViewerView(
                 session: session,
-                assets: feed.items,
+                tiles: feed.items,
                 initial: asset,
                 mode: mode,
                 onFavorite: feed.setFavorite,
@@ -75,7 +75,7 @@ struct FeedGridView: View {
                         ForEach(group.assets) { asset in
                             PhotoCell(
                                 session: session,
-                                asset: asset,
+                                tile: asset,
                                 selected: selection.contains(asset.id),
                                 selecting: !selection.isEmpty
                             ) {
@@ -111,7 +111,7 @@ struct FeedGridView: View {
                     },
                     onAddToAlbum: onAddToAlbum.map { add in
                         {
-                            add(Array(selection))
+                            add(AssetSelection(assetIds: Array(selection)))
                             selection = []
                         }
                     },
@@ -160,10 +160,14 @@ struct FeedGridView: View {
 ///
 /// The count is stated rather than implied. Selecting across a long scroll is easy to lose
 /// track of, and "move 340 photographs to the trash" is a different decision from "move 3".
+/// That holds all the way up: a selection of everything states the number too, which is why
+/// the count here is the resolved one rather than the length of a list.
 struct SelectionBar: View {
     let count: Int
     let showsRestore: Bool
+    var canFavourite: Bool = true
     let onClear: () -> Void
+    var onSelectAll: (() -> Void)?
     let onFavourite: () -> Void
     let onAddToAlbum: (() -> Void)?
     let onTrash: () -> Void
@@ -173,7 +177,12 @@ struct SelectionBar: View {
         HStack(spacing: 20) {
             Button(action: onClear) { Image(systemName: "xmark") }
                 .accessibilityLabel("Clear selection")
-            Text("\(count) selected").font(.subheadline.weight(.medium))
+            Text("\(count.formatted()) selected").font(.subheadline.weight(.medium))
+
+            if let onSelectAll {
+                Button("Select all", action: onSelectAll).font(.subheadline)
+            }
+
             Spacer()
 
             if showsRestore {
@@ -184,8 +193,10 @@ struct SelectionBar: View {
                     Button(action: onAddToAlbum) { Image(systemName: "rectangle.stack.badge.plus") }
                         .accessibilityLabel("Add to album")
                 }
-                Button(action: onFavourite) { Image(systemName: "heart") }
-                    .accessibilityLabel("Favourite")
+                if canFavourite {
+                    Button(action: onFavourite) { Image(systemName: "heart") }
+                        .accessibilityLabel("Favourite")
+                }
                 Button(action: onTrash) { Image(systemName: "trash") }
                     .accessibilityLabel("Move to trash")
             }

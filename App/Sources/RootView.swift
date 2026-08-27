@@ -68,7 +68,7 @@ private struct LibraryView: View {
     @Environment(\.horizontalSizeClass) private var sizeClass
 
     @State private var destination: Destination = .photos
-    @State private var pickingAlbumFor: [String]?
+    @State private var pickingAlbumFor: AssetSelection?
 
     var body: some View {
         let session = model.session(for: account)
@@ -84,7 +84,9 @@ private struct LibraryView: View {
             get: { pickingAlbumFor != nil },
             set: { if !$0 { pickingAlbumFor = nil } }
         )) {
-            AlbumPickerHost(session: session, assetIds: pickingAlbumFor ?? [])
+            if let pickingAlbumFor {
+                AlbumPickerHost(session: session, selection: pickingAlbumFor)
+            }
         }
     }
 
@@ -138,7 +140,7 @@ private struct LibraryView: View {
                 onAddToAlbum: { pickingAlbumFor = $0 }
             )
         case .people:
-            PeopleHost(session: session, columns: columns)
+            PeopleHost(session: session, columns: columns, onAddToAlbum: { pickingAlbumFor = $0 })
         case .favourites:
             FeedHost(
                 session: session,
@@ -174,7 +176,7 @@ private struct LibraryView: View {
 private struct TimelineHost: View {
     let session: Session
     let columns: Int
-    let onAddToAlbum: ([String]) -> Void
+    let onAddToAlbum: (AssetSelection) -> Void
 
     @State private var store: TimelineStore?
 
@@ -202,7 +204,7 @@ private struct FeedHost: View {
     let emptyTitle: String
     let emptyBody: String
     var mode: ViewerMode = .library
-    var onAddToAlbum: (([String]) -> Void)?
+    var onAddToAlbum: ((AssetSelection) -> Void)?
 
     @State private var feed: AssetFeed?
 
@@ -231,7 +233,7 @@ private struct AlbumsHost: View {
     let session: Session
     let columns: Int
     var showsCollections: Bool = false
-    let onAddToAlbum: ([String]) -> Void
+    let onAddToAlbum: (AssetSelection) -> Void
 
     @State private var store: AlbumsStore?
     @State private var openedCollection: Destination?
@@ -300,12 +302,12 @@ private struct CollectionView: View {
     let session: Session
     let columns: Int
     let destination: Destination
-    let onAddToAlbum: ([String]) -> Void
+    let onAddToAlbum: (AssetSelection) -> Void
 
     var body: some View {
         switch destination {
         case .people:
-            PeopleHost(session: session, columns: columns)
+            PeopleHost(session: session, columns: columns, onAddToAlbum: onAddToAlbum)
         case .favourites:
             FeedHost(
                 session: session,
@@ -335,6 +337,7 @@ private struct CollectionView: View {
 private struct PeopleHost: View {
     let session: Session
     let columns: Int
+    var onAddToAlbum: ((AssetSelection) -> Void)?
 
     @State private var store: PeopleStore?
     @State private var openedPerson: Person?
@@ -346,7 +349,12 @@ private struct PeopleHost: View {
                     openedPerson = person
                 }
                 .navigationDestination(item: $openedPerson) { person in
-                    PersonDetailView(session: session, person: person, columns: columns)
+                    PersonDetailView(
+                        session: session,
+                        person: person,
+                        columns: columns,
+                        onAddToAlbum: onAddToAlbum
+                    )
                 }
             } else {
                 ProgressView()
@@ -361,7 +369,7 @@ private struct PeopleHost: View {
 /// not have. One more store, built for the sheet and thrown away with it.
 private struct AlbumPickerHost: View {
     let session: Session
-    let assetIds: [String]
+    let selection: AssetSelection
 
     @State private var store: AlbumsStore?
 
@@ -370,8 +378,8 @@ private struct AlbumPickerHost: View {
             if let store {
                 AlbumPicker(
                     albums: store.albums,
-                    onChoose: { store.add(assetIds, to: $0) },
-                    onCreate: { store.create($0, with: assetIds) }
+                    onChoose: { store.add(selection, to: $0) },
+                    onCreate: { store.create($0, with: selection) }
                 )
             } else {
                 ProgressView()

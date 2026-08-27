@@ -8,14 +8,22 @@ import Observation
 /// before a single one is fetched. Days are then loaded as they come into view, which
 /// means jumping to a date five years back costs one request rather than four hundred.
 ///
+/// What a day loads is tiles, not assets. A square draws an id, a colour, a duration and a
+/// heart; an `Asset` carries checksum, exif, mime types and both captured-at corrections as
+/// well, which over a heavy month is the difference between one round trip and three. The
+/// viewer fetches the whole asset for the one photograph it is showing.
+///
+/// A filter makes this the timeline of a subset — one person's photographs, say — with the
+/// same day headings, the same rail and the same windowing as the library's own.
+///
 /// Loaded days are capped and evicted oldest-touched-first. Scrolling a fifty-thousand
 /// photograph library from end to end must not end with all fifty thousand in memory.
 @MainActor
 @Observable
 public final class TimelineStore {
     public private(set) var index = TimelineIndex(buckets: [])
-    /// Loaded photographs, by day. Days nobody has looked at are simply absent.
-    public private(set) var days: [String: [Asset]] = [:]
+    /// Loaded tiles, by day. Days nobody has looked at are simply absent.
+    public private(set) var days: [String: [TimelineTile]] = [:]
     public private(set) var isLoading = true
     public private(set) var error: String?
 
@@ -24,19 +32,20 @@ public final class TimelineStore {
     /// intention of stopping at.
     public var isScrubbing = false
 
+    /// Which photographs this timeline is of. Empty means the whole library.
+    public let filter: AssetFilter
+
     private let session: Session
     private var inFlight: Set<String> = []
     private var recency: [String] = []
-
-    /// The API's own ceiling. Asking for more is refused rather than truncated.
-    private let pageSize = 500
 
     /// Roughly two thousand photographs on a typical library, which is more than any
     /// screen shows and few enough to hold without thinking about it.
     private let maxLoadedDays = 60
 
-    public init(session: Session) {
+    public init(session: Session, filter: AssetFilter = AssetFilter()) {
         self.session = session
+        self.filter = filter
         Task { await refresh() }
     }
 
@@ -48,7 +57,7 @@ public final class TimelineStore {
         days.removeAll()
 
         do {
-            let timeline = try await session.client.assets.timeline()
+            let timeline = try await session.client.assets.timeline(TimelineQuery(filter: filter))
             index = TimelineIndex(buckets: timeline.buckets)
             isLoading = false
         } catch {
@@ -74,23 +83,17 @@ public final class TimelineStore {
 
         Task {
             defer { inFlight.remove(date) }
-            let bounds = dayBounds(date)
-            var collected: [Asset] = []
+            var collected: [TimelineTile] = []
             var cursor: String?
 
             do {
                 // A day usually fits in one request. A wedding does not, so the loop is
                 // here — but it runs once for almost every day in almost every library.
+                // No limit is sent: the server's default is the right page size to ask
+                // for, and hard-coding one here would be this client's guess at it.
                 repeat {
-                    let page = try await session.client.assets.list(
-                        AssetQuery(
-                            cursor: cursor,
-                            limit: pageSize,
-                            takenAfter: bounds.after,
-                            takenBefore: bounds.before,
-                            sort: .capturedAt,
-                            order: .desc
-                        )
+                    let page = try await session.client.assets.timelineBucket(
+                        TimelineBucketQuery(period: date, filter: filter, cursor: cursor)
                     )
                     collected.append(contentsOf: page.items)
                     cursor = page.nextCursor
@@ -114,29 +117,51 @@ public final class TimelineStore {
 
     // MARK: - Edits
 
-    public func setFavorite(_ asset: Asset, _ favorite: Bool) {
-        edit(asset, AssetUpdate(favorite: favorite)) { $0.favorite = favorite }
+    public func setFavorite(_ tile: TimelineTile, _ favorite: Bool) {
+        // Applied here first and sent afterwards. Pressing the heart should colour it in
+        // immediately; waiting for a round trip to a server in somebody's cupboard makes a
+        // responsive gesture feel broken.
+        var updated = tile
+        updated.favorite = favorite
+        replaceLocally(updated)
+
+        Task {
+            do {
+                _ = try await session.client.assets.update(
+                    tile.id, AssetUpdate(favorite: favorite))
+            } catch {
+                // Put it back the way it was. A heart that stays filled on a server that
+                // refused the change is a lie the interface keeps telling.
+                replaceLocally(tile)
+            }
+        }
     }
 
-    public func setDescription(_ asset: Asset, _ description: String) {
-        edit(asset, AssetUpdate(description: description)) { $0.description = description }
+    /// A description is not on a tile and is not drawn by the grid, so there is nothing
+    /// here to update optimistically — the details sheet holds the asset it edited.
+    public func setDescription(_ assetId: String, _ description: String) {
+        Task {
+            _ = try? await session.client.assets.update(
+                assetId, AssetUpdate(description: description))
+        }
     }
 
     /// Archiving takes a photograph out of the timeline entirely — the server leaves
     /// archived ones out of the buckets, so the grid has to lose the cell as well.
-    public func archive(_ asset: Asset) {
-        removeLocally([asset])
+    public func archive(_ tile: TimelineTile) {
+        removeLocally([tile])
         Task {
-            _ = try? await session.client.assets.update(asset.id, AssetUpdate(archived: true))
+            _ = try? await session.client.assets.update(tile.id, AssetUpdate(archived: true))
         }
     }
 
-    public func trash(_ assets: [Asset]) {
-        guard !assets.isEmpty else { return }
-        removeLocally(assets)
+    public func trash(_ tiles: [TimelineTile]) {
+        guard !tiles.isEmpty else { return }
+        removeLocally(tiles)
         Task {
             do {
-                _ = try await session.client.assets.trash(assets.map(\.id))
+                _ = try await session.client.assets.trash(
+                    AssetSelection(assetIds: tiles.map(\.id)))
             } catch {
                 // The grid is now lying about what is on the server. Only a refetch can
                 // put that right, and it is better than leaving a hole where a photograph
@@ -146,38 +171,51 @@ public final class TimelineStore {
         }
     }
 
-    private func edit(_ asset: Asset, _ patch: AssetUpdate, _ optimistic: (inout Asset) -> Void) {
-        // Applied here first and sent afterwards. Pressing the heart should colour it in
-        // immediately; waiting for a round trip to a server in somebody's cupboard makes a
-        // responsive gesture feel broken.
-        var updated = asset
-        optimistic(&updated)
-        replaceLocally(updated)
+    // MARK: - Everything this timeline is of
 
+    /// The whole timeline as a selection, minus whatever was unticked.
+    ///
+    /// A filter rather than a list of ids: "select all" on a ninety-thousand photograph
+    /// library is not a request body, it is the query the person was already looking at.
+    public func everything(except excluded: Set<String>) -> AssetSelection {
+        AssetSelection(query: filter, except: excluded.isEmpty ? nil : Array(excluded))
+    }
+
+    /// How many photographs a by-query action would touch, fetched before it is offered.
+    ///
+    /// The whole point of a selection by query is that the client never counted them, and
+    /// "delete all photos?" is not a question anybody can answer. So the buckets are asked
+    /// again — one cheap request, no images — and the confirmation states a number. The
+    /// index is the same figure from the same endpoint, so it stands in if the request
+    /// fails rather than leaving the question unanswerable.
+    public func resolvedCount(except excluded: Set<String>) async -> Int {
+        let counted = try? await session.client.assets.timeline(TimelineQuery(filter: filter))
+        let total = counted?.buckets.reduce(0) { $0 + $1.count } ?? index.photoCount
+        return max(total - excluded.count, 0)
+    }
+
+    /// Trashes everything the filter matches. Only ever called behind a confirmation that
+    /// states the count from `resolvedCount(except:)`.
+    public func trashEverything(except excluded: Set<String>) {
         Task {
-            do {
-                replaceLocally(try await session.client.assets.update(asset.id, patch))
-            } catch {
-                // Put it back the way it was. A heart that stays filled on a server that
-                // refused the change is a lie the interface keeps telling.
-                replaceLocally(asset)
-            }
+            _ = try? await session.client.assets.trash(everything(except: excluded))
+            await refresh()
         }
     }
 
-    private func replaceLocally(_ asset: Asset) {
-        let date = String(asset.capturedAt.prefix(10))
-        guard var day = days[date], let position = day.firstIndex(where: { $0.id == asset.id })
+    private func replaceLocally(_ tile: TimelineTile) {
+        let date = dayKey(of: tile)
+        guard var day = days[date], let position = day.firstIndex(where: { $0.id == tile.id })
         else { return }
-        day[position] = asset
+        day[position] = tile
         days[date] = day
     }
 
-    private func removeLocally(_ assets: [Asset]) {
-        let ids = Set(assets.map(\.id))
+    private func removeLocally(_ tiles: [TimelineTile]) {
+        let ids = Set(tiles.map(\.id))
         var perDay: [String: Int] = [:]
-        for asset in assets {
-            perDay[String(asset.capturedAt.prefix(10)), default: 0] += 1
+        for tile in tiles {
+            perDay[dayKey(of: tile), default: 0] += 1
         }
 
         index = index.removing(perDay)
