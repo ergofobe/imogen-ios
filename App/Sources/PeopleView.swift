@@ -192,6 +192,12 @@ struct PersonDetailView: View {
                     emptyTitle: "No photographs",
                     emptyBody: "Nothing here is grouped under this person."
                 )
+                // A new person is a new screen, not the last one's with different
+                // photographs in it. Replacing the store is not enough: the selection
+                // lives in `TimelineView`'s own state, which survives while the view
+                // keeps its identity — and a selection made of one person's photographs
+                // would then trash them from behind another person's grid.
+                .id(person.id)
             } else {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             }

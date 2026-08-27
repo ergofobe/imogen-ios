@@ -38,6 +38,12 @@ struct TimelineView: View {
     /// on a cell would otherwise move the goalposts between the question and the answer.
     @State private var trashExcept: Set<String> = []
     @State private var resolvingTrash = false
+    /// Which resolve the screen is waiting on. Bumped when one starts and again whenever
+    /// the selection is cleared, so a count that comes back for a selection nobody is
+    /// waiting on any more cannot raise a dialog. The flag alone is not enough: clearing
+    /// and selecting again turns it back on, and the abandoned round trip would then put
+    /// its own exclusions behind a confirmation somebody never asked for.
+    @State private var trashRequest = 0
     /// The day at the top of the viewport, which is what the thumb draws itself against.
     @State private var topDay = 0
     /// The height of the grid, so the rail knows how much of the timeline is on screen.
@@ -231,15 +237,21 @@ struct TimelineView: View {
                             // count comes back and somebody agrees to it — against the
                             // exclusions as they were when the button was pressed.
                             let except = unpicked
+                            trashRequest += 1
+                            let token = trashRequest
                             resolvingTrash = true
                             Task {
                                 let count = await store.resolvedCount(except: except)
-                                resolvingTrash = false
                                 // Clearing the selection while the count was being
-                                // resolved is an answer of its own. Asking anyway would
-                                // put a destructive dialog in front of somebody who had
-                                // just backed out of it.
-                                guard selectingAll, count > 0 else {
+                                // resolved is an answer of its own, and so is starting a
+                                // second one. Either way this reply is stale: asking
+                                // anyway would put a destructive dialog in front of
+                                // somebody who had just backed out of it, or state a
+                                // count and a set of exclusions from the selection before
+                                // the one they are looking at.
+                                guard token == trashRequest else { return }
+                                resolvingTrash = false
+                                guard count > 0 else {
                                     clearSelection()
                                     return
                                 }
@@ -314,7 +326,11 @@ struct TimelineView: View {
         picked = []
         unpicked = []
         trashExcept = []
+        trashCount = nil
         resolvingTrash = false
+        // Abandons a count still being resolved, so its answer cannot arrive against a
+        // selection that no longer exists. See `trashRequest`.
+        trashRequest += 1
     }
 }
 
