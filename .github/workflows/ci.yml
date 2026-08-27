@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # So a maintainer can re-run the suite without pushing an empty commit.
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kit:
+    # The logic — accounts, sessions, pairing, the timeline arithmetic — is a plain Swift
+    # package with no UIKit in it, so it is checked on its own and in seconds.
+    name: ImogenKit
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+      - name: Test
+        run: swift test
+      - name: Test again, west of Greenwich
+        # The timeline's day headings are the server's UTC buckets. Rendering them in
+        # local time shifted every one of them by a day, and only a machine that is not
+        # on UTC notices.
+        run: TZ=America/Los_Angeles swift test
+      - name: Test again, east of Greenwich
+        run: TZ=Pacific/Auckland swift test
+
+  app:
+    name: Application
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Check the generated files match project.yml
+        # The project and the Info.plist are both generated and both committed, so the
+        # repository opens in Xcode without tooling. That is only true while they agree.
+        run: |
+          xcodegen generate
+          git diff --exit-code imogen.xcodeproj App/Info.plist || {
+            echo "::error::Generated files are out of date. Run 'xcodegen generate'."
+            exit 1
+          }
+
+      - name: Build
+        run: |
+          xcodebuild build \
+            -project imogen.xcodeproj \
+            -scheme imogen \
+            -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath .build/xcode \
+            | xcpretty || exit ${PIPESTATUS[0]}

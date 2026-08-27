@@ -1,0 +1,18 @@
+.DS_Store
+*.log
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
+*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
+
+# The project file is generated from project.yml but is committed, so that opening the
+# repository in Xcode works without installing anything first. Its per-user parts are not.
+imogen.xcodeproj/project.xcworkspace/xcuserdata/
+imogen.xcodeproj/xcuserdata/

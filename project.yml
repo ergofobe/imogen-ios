@@ -1,0 +1,94 @@
+name: imogen
+options:
+  bundleIdPrefix: com.imogen
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  # The generated project is committed, so that opening the repository in Xcode works
+  # without installing anything first. `xcodegen` regenerates it when this file changes.
+  generateEmptyDirectories: true
+  xcodeVersion: "16.0"
+
+packages:
+  ImogenKit:
+    path: .
+  ImogenSDK:
+    path: imogen-sdk/swift
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  imogen:
+    type: application
+    platform: iOS
+    sources:
+      - path: App/Sources
+      - path: App/Resources
+        buildPhase: resources
+    dependencies:
+      - package: ImogenKit
+        product: ImogenKit
+      - package: ImogenSDK
+        product: ImogenSDK
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: imogen
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        # Why the app asks for things. iOS shows these verbatim, so they say what the
+        # permission is for rather than that one is needed.
+        NSCameraUsageDescription:
+          imogen uses the camera to read the pairing code your imogen server shows,
+          so you do not have to type its address.
+        NSPhotoLibraryUsageDescription:
+          imogen backs up the photographs and videos on this device to the servers you
+          choose. Nothing is uploaded until you turn backup on.
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.imogen.ios.backup
+        UIBackgroundModes:
+          - processing
+        # A private-use scheme, per RFC 8252: pairing links and the OAuth redirect both
+        # come back this way, and a self-hosted server has no fixed domain to verify a
+        # universal link against.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.imogen.ios
+            CFBundleURLSchemes:
+              - imogen
+        ITSAppUsesNonExemptEncryption: false
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.imogen.ios
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        # There is no team here, and CI builds for the simulator, which needs none.
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+
+schemes:
+  imogen:
+    build:
+      targets:
+        imogen: all
+    run:
+      config: Debug
+    archive:
+      config: Release
