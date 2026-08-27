@@ -1,5 +1,4 @@
 import ImogenKit
-import SafariServices
 import SwiftUI
 
 /// Adding an account.
@@ -14,6 +13,7 @@ struct AddAccountView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
+    @State private var authenticator = WebAuthenticator()
     @State private var scanning = false
     @State private var typing = false
     @State private var address = ""
@@ -124,18 +124,15 @@ struct AddAccountView: View {
 
     private func begin() {
         model.beginBrowserSignIn(server: address) { url in
-            // A Safari view controller, not a web view of our own: the browser's session
-            // and password manager are the whole point, and an app that shows its own
-            // login form is an app asking to be phished.
-            guard let scene = UIApplication.shared.connectedScenes
-                .compactMap({ $0 as? UIWindowScene })
-                .first(where: { $0.activationState == .foregroundActive }),
-                let presenter = scene.keyWindow?.rootViewController
-            else { return }
-
-            let safari = SFSafariViewController(url: url)
-            presenter.presentedViewController?.present(safari, animated: true)
-                ?? presenter.present(safari, animated: true)
+            // The system browser, not a web view of our own: its session and password
+            // manager are the whole point, and an app that shows its own login form is an
+            // app asking to be phished.
+            Task {
+                guard let callback = await authenticator.authorize(
+                    at: url, callbackScheme: oauthCallbackScheme
+                ) else { return }
+                model.open(callback)
+            }
         }
     }
 

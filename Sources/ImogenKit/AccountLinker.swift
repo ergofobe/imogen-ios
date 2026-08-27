@@ -4,6 +4,10 @@ import ImogenSDK
 /// Where the operating system sends the browser back to. Registered in the Info.plist.
 public let oauthRedirect = "imogen://oauth"
 
+/// Just the scheme of it, which is what an authentication session is told to watch for.
+/// Derived rather than written twice, so the two cannot drift apart.
+public let oauthCallbackScheme = URL(string: oauthRedirect)?.scheme ?? "imogen"
+
 /// What the app asks for.
 ///
 /// Not everything: an administrator's tools stay behind a browser session, deliberately,
