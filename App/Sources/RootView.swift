@@ -31,9 +31,14 @@ enum Destination: String, CaseIterable, Identifiable, Hashable {
         }
     }
 
-    /// What a phone shows along the bottom. Seven tabs do not fit on a phone, and the ones
-    /// left out are reachable from Settings and from the library itself.
+    /// What a phone shows along the bottom.
+    ///
+    /// Apple puts the ceiling at five and means it: seven tabs is a "More" list nobody
+    /// finds. The three left out are at the top of the Albums screen instead.
     static let compact: [Destination] = [.photos, .search, .albums, .settings]
+
+    /// The three that do not fit, in the order they appear on the Albums screen.
+    static let collections: [Destination] = [.people, .favourites, .trash]
 }
 
 /// The whole application, above the individual screens.
@@ -124,7 +129,14 @@ private struct LibraryView: View {
             SearchView(session: session, columns: columns) { pickingAlbumFor = $0 }
                 .navigationTitle("Search")
         case .albums:
-            AlbumsHost(session: session, columns: columns) { pickingAlbumFor = $0 }
+            AlbumsHost(
+                session: session,
+                columns: columns,
+                // Only where there is no sidebar: on an iPad these are already in it, and
+                // offering the same three things twice on one screen is clutter.
+                showsCollections: sizeClass == .compact,
+                onAddToAlbum: { pickingAlbumFor = $0 }
+            )
         case .people:
             PeopleHost(session: session, columns: columns)
         case .favourites:
@@ -218,15 +230,31 @@ private struct FeedHost: View {
 private struct AlbumsHost: View {
     let session: Session
     let columns: Int
+    var showsCollections: Bool = false
     let onAddToAlbum: ([String]) -> Void
 
     @State private var store: AlbumsStore?
+    @State private var openedCollection: Destination?
 
     var body: some View {
         Group {
             if let store {
-                AlbumsView(session: session, store: store, columns: columns) { album in
-                    openedAlbum = album
+                AlbumsView(
+                    session: session,
+                    store: store,
+                    columns: columns,
+                    onOpen: { openedAlbum = $0 },
+                    shortcuts: showsCollections ? collectionShortcuts : []
+                )
+                .navigationDestination(item: $openedCollection) { destination in
+                    // The same screens the sidebar shows on an iPad, so there is one
+                    // implementation of each rather than two.
+                    CollectionView(
+                        session: session,
+                        columns: columns,
+                        destination: destination,
+                        onAddToAlbum: onAddToAlbum
+                    )
                 }
                 .navigationDestination(item: $openedAlbum) { album in
                     FeedHost(
@@ -257,6 +285,51 @@ private struct AlbumsHost: View {
     }
 
     @State private var openedAlbum: Album?
+
+    private var collectionShortcuts: [CollectionShortcut] {
+        Destination.collections.map { destination in
+            CollectionShortcut(label: destination.label, icon: destination.icon) {
+                openedCollection = destination
+            }
+        }
+    }
+}
+
+/// One of the destinations a phone has no room for along the bottom.
+private struct CollectionView: View {
+    let session: Session
+    let columns: Int
+    let destination: Destination
+    let onAddToAlbum: ([String]) -> Void
+
+    var body: some View {
+        switch destination {
+        case .people:
+            PeopleHost(session: session, columns: columns)
+        case .favourites:
+            FeedHost(
+                session: session,
+                columns: columns,
+                query: AssetQuery(favorite: true),
+                title: "Favourites",
+                emptyTitle: "No favourites yet",
+                emptyBody: "Tap the heart while looking at a photograph to keep it here.",
+                onAddToAlbum: onAddToAlbum
+            )
+        case .trash:
+            FeedHost(
+                session: session,
+                columns: columns,
+                query: AssetQuery(trashed: true),
+                title: "Trash",
+                emptyTitle: "Trash is empty",
+                emptyBody: "Deleted photographs wait here before the server removes them.",
+                mode: .trash
+            )
+        default:
+            EmptyView()
+        }
+    }
 }
 
 private struct PeopleHost: View {

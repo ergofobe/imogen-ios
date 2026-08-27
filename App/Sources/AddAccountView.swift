@@ -50,8 +50,11 @@ struct AddAccountView: View {
         VStack(spacing: 0) {
             Spacer()
 
-            Image(systemName: "camera.aperture")
-                .font(.system(size: 56))
+            Image("ImogenMark")
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: 64, height: 64)
                 .foregroundStyle(.tint)
             Text("imogen").font(.largeTitle.weight(.semibold)).padding(.top, 12)
             Text("Your photo library, on your own server.")

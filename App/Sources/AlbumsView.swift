@@ -92,6 +92,13 @@ struct AlbumsView: View {
     @Bindable var store: AlbumsStore
     let columns: Int
     let onOpen: (Album) -> Void
+    /// Somewhere else in the library, reached from here.
+    ///
+    /// An iPhone has room for four tabs along the bottom and imogen has seven, so People,
+    /// Favourites and Trash live at the top of this screen — which is where Apple and
+    /// Google both put them, and where somebody looking for "my photos of a person"
+    /// already goes. On an iPad they are in the sidebar instead, because there is room.
+    var shortcuts: [CollectionShortcut] = []
 
     @State private var naming = false
     @State private var renaming: Album?
@@ -100,17 +107,36 @@ struct AlbumsView: View {
         Group {
             if store.isLoading && store.albums.isEmpty {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if store.albums.isEmpty {
-                ContentUnavailableView(
-                    "No albums yet",
-                    systemImage: "rectangle.stack",
-                    description: Text(
-                        "An album is a way to keep a set of photographs together — a trip, "
-                            + "a person, a year."
-                    )
-                )
             } else {
                 ScrollView {
+                    if !shortcuts.isEmpty {
+                        VStack(spacing: 0) {
+                            ForEach(shortcuts) { shortcut in
+                                Button(action: shortcut.action) {
+                                    Label(shortcut.label, systemImage: shortcut.icon)
+                                        .font(.body)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 14)
+                                }
+                                .buttonStyle(.plain)
+                                Divider().padding(.leading, 52)
+                            }
+                        }
+                        .padding(.bottom, 8)
+                    }
+
+                    if store.albums.isEmpty {
+                        Text(
+                            "An album is a way to keep a set of photographs together — a trip, "
+                                + "a person, a year."
+                        )
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                    }
+
                     LazyVGrid(
                         columns: Array(
                             repeating: GridItem(.flexible(), spacing: 12),
@@ -170,6 +196,13 @@ private struct AlbumNameFields: View {
         }
         .onAppear { name = initial }
     }
+}
+
+struct CollectionShortcut: Identifiable {
+    let id = UUID()
+    let label: String
+    let icon: String
+    let action: () -> Void
 }
 
 struct AlbumCover: View {

@@ -22,6 +22,12 @@ struct TimelineView: View {
     @State private var details: Asset?
     /// The day at the top of the viewport, which is what the thumb draws itself against.
     @State private var topDay = 0
+    /// The height of the grid, so the rail knows how much of the timeline is on screen.
+    @State private var viewportHeight: Double = 0
+    /// Cancelled and restarted on every seek, so a flick across a decade fetches the day
+    /// it stops on rather than every day it passes through.
+    @State private var settle: Task<Void, Never>?
+    @State private var gridWidth: Double = 0
 
     var body: some View {
         Group {
@@ -66,6 +72,22 @@ struct TimelineView: View {
         }
     }
 
+    private var layout: TimelineLayout {
+        TimelineLayout(
+            index: store.index,
+            metrics: TimelineMetrics(
+                // The grid is squares with two points of spacing, plus a heading.
+                columns: columns,
+                rowHeight: (viewportHeight > 0 ? cellSide : 100) + 2,
+                headerHeight: 34,
+                viewportHeight: viewportHeight
+            )
+        )
+    }
+
+    /// A cell is the width left over once the gaps are taken out.
+    private var cellSide: Double { max((gridWidth - Double(columns - 1) * 2) / Double(columns), 1) }
+
     private var grid: some View {
         ScrollViewReader { scroller in
             ZStack(alignment: .trailing) {
@@ -100,12 +122,34 @@ struct TimelineView: View {
                 }
 
                 Scrubber(
-                    index: store.index,
+                    layout: layout,
                     day: topDay,
                     isScrubbing: $store.isScrubbing
                 ) { day in
                     topDay = day
                     scroller.scrollTo(day, anchor: .top)
+                    // The design's rule: suspend fetching while the rail is moving and
+                    // resume shortly after it settles, so a drag across fifteen years
+                    // issues a couple of requests rather than forty.
+                    settle?.cancel()
+                    settle = Task {
+                        try? await Task.sleep(for: .milliseconds(150))
+                        guard !Task.isCancelled else { return }
+                        store.load(around: day)
+                    }
+                }
+            }
+            .background {
+                GeometryReader { proxy in
+                    Color.clear
+                        .onAppear {
+                            viewportHeight = proxy.size.height
+                            gridWidth = proxy.size.width
+                        }
+                        .onChange(of: proxy.size) { _, size in
+                            viewportHeight = size.height
+                            gridWidth = size.width
+                        }
                 }
             }
             .safeAreaInset(edge: .bottom) {

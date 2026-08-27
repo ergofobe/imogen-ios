@@ -88,15 +88,23 @@ rows for a lifetime, one request, no images. From that the app knows exactly how
 there are and where every day begins before fetching a single photograph:
 
 - the grid is the right length from the first frame, so nothing reflows as data arrives
-- **the scrubber** on the right edge drags through the whole library, showing the month
-  under your thumb, and lands where it says it will — weighted by photographs rather than
-  by dates, so halfway down is halfway through the library
+- **the rail** on the right edge is a thumb until you take hold of it, and then it is a
+  ruler: year marks spaced by how much of the library each year holds, and the month under
+  your thumb named as you drag. A year of nine thousand frames takes more rail than a year
+  of two hundred, because that is where its photographs are
+- the thumb is positioned by a segment table — a running total of estimated pixel heights,
+  a heading plus however many rows each day needs — not by a photograph's position in the
+  list. Those are different measurements, and using the wrong one is what makes a scrubber
+  jump while the content scrolls smoothly
 - days load as they come into view, one request each — jumping to a date five years back
   costs one request, not four hundred
 - days scrolled far past are evicted, so scrolling end to end does not end with fifty
   thousand assets in memory
-- nothing is fetched *during* a drag, so a flick across a decade does not ask the server
-  for every day it passes through
+- nothing is fetched *during* a drag, and fetching resumes 150 ms after it settles, so a
+  flick across a decade does not ask the server for every day it passes through
+
+The same segment table is what the web timeline is being rebuilt on, so the three clients
+describe the library the same way.
 
 ## Working on it
 
