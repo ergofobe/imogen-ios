@@ -46,6 +46,7 @@ struct Scrubber: View {
                     Color.clear.contentShape(Rectangle())
 
                     years(marks, travel: travel)
+                    bubble(fraction: fraction, travel: travel)
                     thumb(fraction: fraction, travel: travel)
                 }
                 .gesture(drag(travel: travel))
@@ -68,60 +69,65 @@ struct Scrubber: View {
     /// thing this screen is for — and a permanent row of ticks down the edge reads as
     /// chrome rather than as a control. So the rail is a thumb until somebody takes hold
     /// of it, and then it is a ruler.
+    ///
+    /// Hard against the trailing edge, with nothing after them: a tick would have pointed
+    /// at the rail the year is already on. The thumb passes over one now and then, which
+    /// costs less than a column of punctuation.
     private func years(_ marks: [YearMark], travel: Double) -> some View {
         ForEach(marks, id: \.year) { mark in
-            HStack(spacing: 5) {
-                Spacer(minLength: 0)
-
-                Text(verbatim: String(mark.year))
-                    .font(.caption2.weight(.semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(.regularMaterial, in: Capsule())
-
-                Capsule()
-                    .fill(.secondary)
-                    .frame(width: 10, height: 1.5)
-                    .opacity(0.9)
-            }
-            .frame(width: railWidth - 40, height: 16, alignment: .trailing)
-            .padding(.trailing, 40)
-            .offset(y: mark.fraction * travel + thumbHeight / 2 - 8)
-            .allowsHitTesting(false)
+            Text(verbatim: String(mark.year))
+                .font(.caption2.weight(.semibold))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(.regularMaterial, in: Capsule())
+                .frame(width: railWidth - 8, alignment: .trailing)
+                .padding(.trailing, 8)
+                .offset(y: mark.fraction * travel + thumbHeight / 2 - 10)
+                .allowsHitTesting(false)
         }
         .opacity(isScrubbing ? 1 : 0)
         .animation(.easeOut(duration: 0.18), value: isScrubbing)
     }
 
-    private func thumb(fraction: Double, travel: Double) -> some View {
-        HStack(spacing: 8) {
-            if isScrubbing {
-                Text(monthHeading(layout.index.date(ofDay: dragDay)))
-                    .font(.subheadline.weight(.semibold))
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(.tint, in: Capsule())
-                    .foregroundStyle(.white)
-                    .fixedSize()
-                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .trailing)))
-            }
+    /// The month under the thumb.
+    ///
+    /// Drawn on its own rather than beside the thumb: measured against the rail's width it
+    /// broke "December 2024" across two lines, and measured unbounded inside a row it
+    /// pushed the thumb off the screen. So it hangs to the left, from the same offset, and
+    /// the rail stays narrow enough not to swallow taps meant for the photographs.
+    private func bubble(fraction: Double, travel: Double) -> some View {
+        Text(monthHeading(layout.index.date(ofDay: dragDay)))
+            .font(.subheadline.weight(.semibold))
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(.tint, in: Capsule())
+            .foregroundStyle(.white)
+            .frame(width: railWidth - 46, alignment: .trailing)
+            .padding(.trailing, 46)
+            .offset(y: fraction * travel + 4)
+            .opacity(isScrubbing ? 1 : 0)
+            .animation(.snappy(duration: 0.18), value: isScrubbing)
+            .allowsHitTesting(false)
+    }
 
-            Image(systemName: "line.3.horizontal")
-                .font(.system(size: 14, weight: .semibold))
-                .frame(width: 30, height: thumbHeight - 8)
-                .background(
-                    isScrubbing ? AnyShapeStyle(.tint) : AnyShapeStyle(.regularMaterial),
-                    in: Capsule()
-                )
-                .foregroundStyle(isScrubbing ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
-                .shadow(color: .black.opacity(isScrubbing ? 0.2 : 0), radius: 6, y: 2)
-        }
-        .padding(.trailing, 6)
-        .offset(y: fraction * travel + 4)
-        .animation(.snappy(duration: 0.18), value: isScrubbing)
-        .allowsHitTesting(false)
+    private func thumb(fraction: Double, travel: Double) -> some View {
+        Image(systemName: "line.3.horizontal")
+            .font(.system(size: 14, weight: .semibold))
+            .frame(width: 30, height: thumbHeight - 8)
+            .background(
+                isScrubbing ? AnyShapeStyle(.tint) : AnyShapeStyle(.regularMaterial),
+                in: Capsule()
+            )
+            .foregroundStyle(isScrubbing ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+            .shadow(color: .black.opacity(isScrubbing ? 0.2 : 0), radius: 6, y: 2)
+            .padding(.trailing, 6)
+            .offset(y: fraction * travel + 4)
+            .animation(.snappy(duration: 0.18), value: isScrubbing)
+            .allowsHitTesting(false)
     }
 
     private func drag(travel: Double) -> some Gesture {
