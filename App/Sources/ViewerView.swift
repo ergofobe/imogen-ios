@@ -33,7 +33,10 @@ struct ViewerView<Tile: PhotoTile>: View {
     @State private var loaded: Asset?
 
     private var tile: Tile? {
-        tiles.first { $0.id == current } ?? tiles.first
+        // `current` is empty until the first appearance, and falling back to the first of
+        // the day there would fetch and name the wrong photograph on the way in.
+        guard !current.isEmpty else { return initial }
+        return tiles.first { $0.id == current } ?? tiles.first
     }
 
     /// The photograph the chrome is describing. Not `current`: trashing the one on screen
@@ -92,7 +95,11 @@ struct ViewerView<Tile: PhotoTile>: View {
                 return
             }
             loaded = nil
-            loaded = try? await session.client.assets.get(shownId)
+            let fetched = try? await session.client.assets.get(shownId)
+            // A swipe supersedes this task, and writing a late answer would blank the
+            // title bar and disable the info button for the photograph now on screen.
+            guard !Task.isCancelled else { return }
+            loaded = fetched
         }
     }
 

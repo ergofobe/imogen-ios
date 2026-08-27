@@ -235,7 +235,11 @@ struct TimelineView: View {
                             Task {
                                 let count = await store.resolvedCount(except: except)
                                 resolvingTrash = false
-                                guard count > 0 else {
+                                // Clearing the selection while the count was being
+                                // resolved is an answer of its own. Asking anyway would
+                                // put a destructive dialog in front of somebody who had
+                                // just backed out of it.
+                                guard selectingAll, count > 0 else {
                                     clearSelection()
                                     return
                                 }
@@ -309,6 +313,8 @@ struct TimelineView: View {
         selectingAll = false
         picked = []
         unpicked = []
+        trashExcept = []
+        resolvingTrash = false
     }
 }
 

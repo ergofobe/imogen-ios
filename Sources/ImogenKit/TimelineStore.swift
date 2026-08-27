@@ -65,11 +65,17 @@ public final class TimelineStore {
         recency.removeAll()
         days.removeAll()
 
+        let mine = generation
         do {
             let timeline = try await session.client.assets.timeline(TimelineQuery(filter: filter))
+            // Two refreshes can be in the air at once — a pull while a bulk trash finishes
+            // — and the slower one landing last would leave the index describing the
+            // library as it was before the faster one.
+            guard mine == generation else { return }
             index = TimelineIndex(buckets: timeline.buckets)
             isLoading = false
         } catch {
+            guard mine == generation else { return }
             self.error = describe(error)
             isLoading = false
         }
@@ -165,10 +171,13 @@ public final class TimelineStore {
     /// Archiving takes a photograph out of the timeline entirely — the server leaves
     /// archived ones out of the buckets, so the grid has to lose the cell as well.
     public func archive(_ id: String) {
-        removeLocally([id])
+        let removed = removeLocally([id])
         Task {
             do {
                 _ = try await session.client.assets.update(id, AssetUpdate(archived: true))
+                // Its day was not loaded, so the index still counts it and the grid would
+                // keep a placeholder cell for a photograph that has left the timeline.
+                if removed == 0 { await refresh() }
             } catch {
                 // The cell is gone and the photograph is not. Only a refetch puts the grid
                 // back in step with the library.

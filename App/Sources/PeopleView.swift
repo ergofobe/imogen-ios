@@ -198,9 +198,9 @@ struct PersonDetailView: View {
         }
         .navigationTitle(person.name ?? "Unnamed")
         // Keyed on the person rather than on the store being absent: a detail pane that
-        // swaps one person for another keeps the view and would otherwise keep the last
-        // one's photographs.
-        .onAppear {
+        // swaps one person for another keeps the view, and `onAppear` would not fire again
+        // to notice — leaving the last person's photographs on screen.
+        .task(id: person.id) {
             if store?.filter.personId != person.id {
                 store = TimelineStore(
                     session: session, filter: AssetFilter(personId: person.id)
