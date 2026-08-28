@@ -66,5 +66,8 @@ private func pairFromEnvironmentIfAsked() {
 
 extension Color {
     /// The safelight orange from a darkroom, which is imogen's one colour.
-    static let imogenSafelight = Color(red: 0.89, green: 0.61, blue: 0.36)
+    ///
+    /// Backed by the AccentColor asset, so light and dark mode get the same value
+    /// system controls do, and there's a single source of truth for the color.
+    static let imogenSafelight = Color("AccentColor")
 }
