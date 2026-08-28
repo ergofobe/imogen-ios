@@ -15,11 +15,35 @@ struct TimelineView: View {
     let session: Session
     @Bindable var store: TimelineStore
     let columns: Int
-    var onAddToAlbum: (([String]) -> Void)?
+    var onAddToAlbum: ((AssetSelection) -> Void)?
+    /// What an empty one says. The library's own emptiness and a filtered timeline's are
+    /// different facts, and offering to turn on backup is only an answer to the first.
+    var emptyTitle: String = "Your library is empty"
+    var emptyBody: String = "Turn on backup, or add photographs from another device — "
+        + "they will appear here, newest first."
 
-    @State private var selection: Set<String> = []
-    @State private var opened: Asset?
+    /// Photographs ticked one at a time.
+    @State private var picked: Set<String> = []
+    /// Photographs unticked from "everything", which is a different question: one is a
+    /// list to send, the other is the filter minus a handful.
+    @State private var unpicked: Set<String> = []
+    @State private var selectingAll = false
+    @State private var opened: TimelineTile?
     @State private var details: Asset?
+    /// The count a by-query trash resolved to, and what puts its confirmation on screen.
+    /// Set only once the server has been asked, so the question always names a number.
+    @State private var trashCount: Int?
+    /// The exclusions the count was resolved against, kept so that the confirmation and
+    /// the deletion are the same set. The grid stays live during the round trip and a tap
+    /// on a cell would otherwise move the goalposts between the question and the answer.
+    @State private var trashExcept: Set<String> = []
+    @State private var resolvingTrash = false
+    /// Which resolve the screen is waiting on. Bumped when one starts and again whenever
+    /// the selection is cleared, so a count that comes back for a selection nobody is
+    /// waiting on any more cannot raise a dialog. The flag alone is not enough: clearing
+    /// and selecting again turns it back on, and the abandoned round trip would then put
+    /// its own exclusions behind a confirmation somebody never asked for.
+    @State private var trashRequest = 0
     /// The day at the top of the viewport, which is what the thumb draws itself against.
     @State private var topDay = 0
     /// The height of the grid, so the rail knows how much of the timeline is on screen.
@@ -43,33 +67,62 @@ struct TimelineView: View {
                 }
             } else if store.index.isEmpty {
                 ContentUnavailableView(
-                    "Your library is empty",
+                    emptyTitle,
                     systemImage: "photo.on.rectangle.angled",
-                    description: Text(
-                        "Turn on backup, or add photographs from another device — they "
-                            + "will appear here, newest first."
-                    )
+                    description: Text(emptyBody)
                 )
             } else {
                 grid
             }
         }
-        .fullScreenCover(item: $opened) { asset in
+        .fullScreenCover(item: $opened) { tile in
             ViewerView(
                 session: session,
-                assets: store.days[String(asset.capturedAt.prefix(10))] ?? [asset],
-                initial: asset,
+                tiles: store.days[dayKey(of: tile)] ?? [tile],
+                initial: tile,
                 mode: .library,
-                onFavorite: store.setFavorite,
-                onArchive: { store.archive($0) },
-                onTrash: { store.trash([$0]) },
+                onFavorite: { store.setFavorite($0.id, $1) },
+                onArchive: { store.archive($0.id) },
+                onTrash: { store.trash([$0.id]) },
                 onRestore: { _ in },
                 onDetails: { details = $0 }
             )
         }
         .sheet(item: $details) { asset in
-            DetailsView(asset: asset) { store.setDescription(asset, $0) }
+            DetailsView(asset: asset) { store.setDescription(asset.id, $0) }
         }
+        .confirmationDialog(
+            trashQuestion,
+            isPresented: .init(
+                get: { trashCount != nil },
+                set: { if !$0 { trashCount = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Move to trash", role: .destructive) {
+                store.trashEverything(except: trashExcept)
+                clearSelection()
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert(
+            store.notice ?? "",
+            isPresented: .init(
+                get: { store.notice != nil },
+                set: { if !$0 { store.notice = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) {}
+        }
+    }
+
+    /// Always a number, never "all photos": a question nobody can answer is not a
+    /// confirmation, and a selection by query is precisely the case where the interface
+    /// has not counted them itself.
+    private var trashQuestion: String {
+        guard let trashCount else { return "" }
+        let photos = trashCount == 1 ? "photo" : "photos"
+        return "Move \(trashCount.formatted()) \(photos) to the trash?"
     }
 
     private var layout: TimelineLayout {
@@ -153,24 +206,58 @@ struct TimelineView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                if !selection.isEmpty {
+                if isSelecting {
                     SelectionBar(
-                        count: selection.count,
+                        count: selectedCount,
                         showsRestore: false,
-                        onClear: { selection = [] },
+                        // There is no bulk favourite in the API, so an "everything"
+                        // selection would mean a request per photograph. Offering the
+                        // heart there would be offering ninety thousand round trips.
+                        canFavourite: !selectingAll,
+                        isBusy: resolvingTrash,
+                        onClear: clearSelection,
+                        onSelectAll: selectingAll ? nil : { selectingAll = true; picked = [] },
                         onFavourite: {
-                            for asset in selected() { store.setFavorite(asset, true) }
-                            selection = []
+                            for id in picked { store.setFavorite(id, true) }
+                            clearSelection()
                         },
                         onAddToAlbum: onAddToAlbum.map { add in
                             {
-                                add(Array(selection))
-                                selection = []
+                                add(currentSelection)
+                                clearSelection()
                             }
                         },
                         onTrash: {
-                            store.trash(selected())
-                            selection = []
+                            guard selectingAll else {
+                                store.trash(picked)
+                                clearSelection()
+                                return
+                            }
+                            // Asked before it is offered. Nothing is trashed until the
+                            // count comes back and somebody agrees to it — against the
+                            // exclusions as they were when the button was pressed.
+                            let except = unpicked
+                            trashRequest += 1
+                            let token = trashRequest
+                            resolvingTrash = true
+                            Task {
+                                let count = await store.resolvedCount(except: except)
+                                // Clearing the selection while the count was being
+                                // resolved is an answer of its own, and so is starting a
+                                // second one. Either way this reply is stale: asking
+                                // anyway would put a destructive dialog in front of
+                                // somebody who had just backed out of it, or state a
+                                // count and a set of exclusions from the selection before
+                                // the one they are looking at.
+                                guard token == trashRequest else { return }
+                                resolvingTrash = false
+                                guard count > 0 else {
+                                    clearSelection()
+                                    return
+                                }
+                                trashExcept = except
+                                trashCount = count
+                            }
                         },
                         onRestore: {}
                     )
@@ -185,16 +272,16 @@ struct TimelineView: View {
         let loaded = store.days[date]
 
         ForEach(0..<store.index.count(ofDay: day), id: \.self) { offset in
-            if let asset = loaded?[safe: offset] {
+            if let tile = loaded?[safe: offset] {
                 PhotoCell(
                     session: session,
-                    asset: asset,
-                    selected: selection.contains(asset.id),
-                    selecting: !selection.isEmpty
+                    tile: tile,
+                    selected: isSelected(tile.id),
+                    selecting: isSelecting
                 ) {
-                    if selection.isEmpty { opened = asset } else { toggle(asset.id) }
+                    if isSelecting { toggle(tile.id) } else { opened = tile }
                 } onLongPress: {
-                    toggle(asset.id)
+                    toggle(tile.id)
                 }
             } else {
                 // A cell whose day has not arrived. Deliberately flat and unanimated: a
@@ -207,12 +294,43 @@ struct TimelineView: View {
         }
     }
 
-    private func toggle(_ id: String) {
-        if selection.contains(id) { selection.remove(id) } else { selection.insert(id) }
+    private var isSelecting: Bool { selectingAll || !picked.isEmpty }
+
+    private var selectedCount: Int {
+        selectingAll ? max(store.index.photoCount - unpicked.count, 0) : picked.count
     }
 
-    private func selected() -> [Asset] {
-        store.days.values.flatMap { $0 }.filter { selection.contains($0.id) }
+    /// What a bulk action would act on. A list while photographs are ticked one at a time,
+    /// and the query behind the grid once "select all" is on — which is the whole point:
+    /// a hundred thousand ids do not belong in a request body.
+    private var currentSelection: AssetSelection {
+        selectingAll
+            ? store.everything(except: unpicked)
+            : AssetSelection(assetIds: Array(picked))
+    }
+
+    private func isSelected(_ id: String) -> Bool {
+        selectingAll ? !unpicked.contains(id) : picked.contains(id)
+    }
+
+    private func toggle(_ id: String) {
+        if selectingAll {
+            if unpicked.contains(id) { unpicked.remove(id) } else { unpicked.insert(id) }
+        } else {
+            if picked.contains(id) { picked.remove(id) } else { picked.insert(id) }
+        }
+    }
+
+    private func clearSelection() {
+        selectingAll = false
+        picked = []
+        unpicked = []
+        trashExcept = []
+        trashCount = nil
+        resolvingTrash = false
+        // Abandons a count still being resolved, so its answer cannot arrive against a
+        // selection that no longer exists. See `trashRequest`.
+        trashRequest += 1
     }
 }
 
@@ -233,20 +351,20 @@ struct DayHeader: View {
     }
 }
 
-struct PhotoCell: View {
+struct PhotoCell<Tile: PhotoTile>: View {
     let session: Session
-    let asset: Asset
+    let tile: Tile
     let selected: Bool
     let selecting: Bool
     let onTap: () -> Void
     let onLongPress: () -> Void
 
     var body: some View {
-        AssetImage(session: session, asset: asset)
+        AssetImage(session: session, assetId: tile.id, placeholderColor: tile.placeholderColor)
             .aspectRatio(1, contentMode: .fill)
             .clipped()
             .overlay(alignment: .center) {
-                if asset.type == .video {
+                if tile.type == .video {
                     Image(systemName: "play.circle.fill")
                         .font(.title2)
                         .foregroundStyle(.white)
@@ -254,7 +372,7 @@ struct PhotoCell: View {
                 }
             }
             .overlay(alignment: .bottomLeading) {
-                if asset.favorite, !selecting {
+                if tile.favorite, !selecting {
                     Image(systemName: "heart.fill")
                         .font(.caption2)
                         .foregroundStyle(.white)
@@ -278,7 +396,7 @@ struct PhotoCell: View {
             .contentShape(Rectangle())
             .onTapGesture(perform: onTap)
             .onLongPressGesture(perform: onLongPress)
-            .accessibilityLabel(asset.description ?? asset.originalFilename)
+            .accessibilityLabel(tile.spokenLabel)
     }
 }
 

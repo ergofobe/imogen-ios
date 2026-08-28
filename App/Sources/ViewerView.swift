@@ -10,51 +10,72 @@ enum ViewerMode { case library, trash }
 /// Black, and the chrome hides on a tap. A photograph shown inside a frame of interface is
 /// a photograph you are looking at; a photograph filling the screen is one you are looking
 /// into, and that is the difference this screen exists to make.
-struct ViewerView: View {
+///
+/// It pages over tiles, because that is what the grid it was opened from holds, and fetches
+/// the whole asset for the one photograph on screen. Everything the chrome shows beyond a
+/// heart — the filename here, the exif behind the info button — lives on the asset and not
+/// on the tile, and one photograph at a time is exactly the right number to ask for.
+struct ViewerView<Tile: PhotoTile>: View {
     let session: Session
-    let assets: [Asset]
-    let initial: Asset
+    let tiles: [Tile]
+    let initial: Tile
     let mode: ViewerMode
-    var onFavorite: (Asset, Bool) -> Void
-    var onArchive: (Asset) -> Void
-    var onTrash: (Asset) -> Void
-    var onRestore: (Asset) -> Void
+    var onFavorite: (Tile, Bool) -> Void
+    var onArchive: (Tile) -> Void
+    var onTrash: (Tile) -> Void
+    var onRestore: (Tile) -> Void
     var onDetails: (Asset) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var current: String = ""
     @State private var chromeVisible = true
+    /// The asset behind the page on screen, once it arrives.
+    @State private var loaded: Asset?
 
-    private var asset: Asset? {
-        assets.first { $0.id == current } ?? assets.first
+    private var tile: Tile? {
+        // `current` is empty until the first appearance, and falling back to the first of
+        // the day there would fetch and name the wrong photograph on the way in.
+        guard !current.isEmpty else { return initial }
+        return tiles.first { $0.id == current } ?? tiles.first
     }
+
+    /// The photograph the chrome is describing. Not `current`: trashing the one on screen
+    /// shortens the list and `tile` falls back to the first, while `current` still names
+    /// the photograph that has gone.
+    private var shownId: String { tile?.id ?? "" }
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
 
             TabView(selection: $current) {
-                ForEach(assets) { asset in
+                ForEach(tiles) { tile in
                     Group {
-                        if asset.type == .video {
-                            VideoPage(session: session, asset: asset, active: current == asset.id)
+                        if tile.type == .video {
+                            VideoPage(
+                                session: session, assetId: tile.id, active: current == tile.id
+                            )
                         } else {
-                            ZoomablePhoto(session: session, asset: asset) {
+                            ZoomablePhoto(
+                                session: session,
+                                assetId: tile.id,
+                                placeholderColor: tile.placeholderColor
+                            ) {
                                 withAnimation { chromeVisible.toggle() }
                             }
                         }
                     }
-                    .tag(asset.id)
+                    .tag(tile.id)
                 }
             }
             .tabViewStyle(.page(indexDisplayMode: .never))
             .ignoresSafeArea()
 
-            if chromeVisible, let asset {
+            if chromeVisible, let tile {
                 VStack {
-                    top(asset)
+                    top(tile)
                     Spacer()
-                    bottom(asset)
+                    bottom(tile)
                 }
                 .transition(.opacity)
             }
@@ -63,21 +84,40 @@ struct ViewerView: View {
         .onAppear { current = initial.id }
         // Every photograph deleted from underneath the pager shortens the list. Closing
         // when it empties is the only sensible end to that.
-        .onChange(of: assets.isEmpty) { _, empty in if empty { dismiss() } }
+        .onChange(of: tiles.isEmpty) { _, empty in if empty { dismiss() } }
+        .task(id: shownId) {
+            guard !shownId.isEmpty else { return }
+            // A feed was handed whole assets and is holding this one already. Asking the
+            // server for what is in the array above would be a round trip and a blank
+            // title bar on five screens that used to draw instantly.
+            if let already = tile?.fullAsset {
+                loaded = already
+                return
+            }
+            loaded = nil
+            let fetched = try? await session.client.assets.get(shownId)
+            // A swipe supersedes this task, and writing a late answer would blank the
+            // title bar and disable the info button for the photograph now on screen.
+            guard !Task.isCancelled else { return }
+            loaded = fetched
+        }
     }
 
-    private func top(_ asset: Asset) -> some View {
+    private func top(_ tile: Tile) -> some View {
         HStack {
             Button { dismiss() } label: {
                 Image(systemName: "chevron.left").font(.headline)
             }
-            Text(asset.originalFilename)
+            // Blank rather than a placeholder until the asset lands: a filename appearing
+            // is unremarkable, a filename changing from "Loading…" is a flicker.
+            Text(loaded?.originalFilename ?? "")
                 .font(.subheadline)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity)
-            Button { onDetails(asset) } label: {
+            Button { if let loaded { onDetails(loaded) } } label: {
                 Image(systemName: "info.circle").font(.headline)
             }
+            .disabled(loaded == nil)
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 16)
@@ -85,25 +125,25 @@ struct ViewerView: View {
         .background(.black.opacity(0.45))
     }
 
-    private func bottom(_ asset: Asset) -> some View {
+    private func bottom(_ tile: Tile) -> some View {
         HStack(spacing: 44) {
             if mode == .trash {
-                Button { onRestore(asset) } label: {
+                Button { onRestore(tile) } label: {
                     Image(systemName: "arrow.uturn.backward")
                 }
                 .accessibilityLabel("Put back")
             } else {
-                Button { onFavorite(asset, !asset.favorite) } label: {
-                    Image(systemName: asset.favorite ? "heart.fill" : "heart")
+                Button { onFavorite(tile, !tile.favorite) } label: {
+                    Image(systemName: tile.favorite ? "heart.fill" : "heart")
                 }
                 .accessibilityLabel("Favourite")
 
-                Button { onArchive(asset) } label: {
+                Button { onArchive(tile) } label: {
                     Image(systemName: "archivebox")
                 }
                 .accessibilityLabel("Archive")
 
-                Button { onTrash(asset) } label: {
+                Button { onTrash(tile) } label: {
                     Image(systemName: "trash")
                 }
                 .accessibilityLabel("Move to trash")
@@ -123,7 +163,8 @@ struct ViewerView: View {
 /// there, which is the failure mode of every zoom implementation that forgets to.
 private struct ZoomablePhoto: View {
     let session: Session
-    let asset: Asset
+    let assetId: String
+    let placeholderColor: String?
     let onTap: () -> Void
 
     @State private var scale: CGFloat = 1
@@ -133,7 +174,13 @@ private struct ZoomablePhoto: View {
 
     var body: some View {
         GeometryReader { proxy in
-            AssetImage(session: session, asset: asset, variant: "preview", contentMode: .fit)
+            AssetImage(
+                session: session,
+                assetId: assetId,
+                placeholderColor: placeholderColor,
+                variant: "preview",
+                contentMode: .fit
+            )
                 .scaleEffect(scale)
                 .offset(offset)
                 .frame(width: proxy.size.width, height: proxy.size.height)
@@ -185,15 +232,15 @@ private struct ZoomablePhoto: View {
 /// authentication, and `AVURLAsset` takes the header as an option.
 private struct VideoPage: View {
     let session: Session
-    let asset: Asset
+    let assetId: String
     let active: Bool
 
     @State private var player: AVPlayer?
 
     var body: some View {
         VideoPlayer(player: player)
-            .task(id: asset.id) {
-                guard let url = session.assetURL(asset.id, variant: "original") else { return }
+            .task(id: assetId) {
+                guard let url = session.assetURL(assetId, variant: "original") else { return }
                 let headers = await session.authorizationHeaders()
                 let item = AVURLAsset(
                     url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": headers]

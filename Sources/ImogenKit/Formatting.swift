@@ -75,12 +75,19 @@ public func monthHeading(_ date: String) -> String {
     return utcFormatter(template: "MMMMyyyy").string(from: parsed)
 }
 
-public func fullDate(_ iso: String) -> String {
-    guard let parsed = isoInstantParser.date(from: String(iso.prefix(19))) else { return iso }
+/// Built once, like every other formatter here. This one is read by the accessibility
+/// label of every cell in the grid, and a `DateFormatter` per visible square of a
+/// ninety-thousand photograph timeline is a lot of work to do while somebody is scrolling.
+private let readableInstant: DateFormatter = {
     let formatter = DateFormatter()
     formatter.dateStyle = .long
     formatter.timeStyle = .short
-    return formatter.string(from: parsed)
+    return formatter
+}()
+
+public func fullDate(_ iso: String) -> String {
+    guard let parsed = isoInstantParser.date(from: String(iso.prefix(19))) else { return iso }
+    return readableInstant.string(from: parsed)
 }
 
 public func formatBytes(_ bytes: Int) -> String {

@@ -98,7 +98,7 @@ public final class AssetFeed {
         items.removeAll { ids.contains($0.id) }
         Task {
             do {
-                _ = try await session.client.assets.trash(ids)
+                _ = try await session.client.assets.trash(AssetSelection(assetIds: ids))
             } catch {
                 putBack(removed)
             }
@@ -110,7 +110,7 @@ public final class AssetFeed {
         items.removeAll { ids.contains($0.id) }
         Task {
             do {
-                _ = try await session.client.assets.restore(ids)
+                _ = try await session.client.assets.restore(AssetSelection(assetIds: ids))
             } catch {
                 putBack(removed)
             }
