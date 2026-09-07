@@ -90,6 +90,10 @@ public struct AccountLinker: Sendable {
         let registered = try await oauth.register(
             name: clientName, redirectURIs: [oauthRedirect], scopes: mobileScopes
         )
+        // No resource indicator, so the token stays good at every surface. Pairing
+        // cannot bind one — its claim endpoint mints the code server-side and records
+        // no resource — and an account added by browser answering differently from a
+        // paired one would cost more than the narrower token is worth here today.
         let pending = try await oauth.beginAuthorization(
             clientId: registered.clientId, redirectURI: oauthRedirect, scopes: mobileScopes
         )
@@ -100,7 +104,8 @@ public struct AccountLinker: Sendable {
                 clientId: pending.clientId,
                 codeVerifier: pending.codeVerifier,
                 state: pending.state,
-                redirectURI: pending.redirectURI
+                redirectURI: pending.redirectURI,
+                resource: pending.resource
             )
         )
 
@@ -121,7 +126,8 @@ public struct AccountLinker: Sendable {
                 codeVerifier: pending.codeVerifier,
                 state: pending.state,
                 redirectURI: pending.redirectURI,
-                clientId: pending.clientId
+                clientId: pending.clientId,
+                resource: pending.resource
             ),
             callbackURL: callback
         )
@@ -168,11 +174,19 @@ public struct AccountLinker: Sendable {
         return try? JSONDecoder().decode(Pending.self, from: data)
     }
 
-    private struct Pending: Codable {
+    /// Not private, so its encoding can be tested: it is written before the browser opens
+    /// and read back by whatever process comes after, which makes it a compatibility
+    /// surface rather than a detail.
+    struct Pending: Codable {
         let serverURL: String
         let clientId: String
         let codeVerifier: String
         let state: String
         let redirectURI: String
+        /// Whatever the authorization request named, so the token request can name the
+        /// same one. Optional in the decoder's sense too: a record written before this
+        /// field existed decodes as an unbound sign-in rather than failing and stranding
+        /// somebody mid-flow.
+        let resource: String?
     }
 }
