@@ -39,8 +39,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: imogen
-        CFBundleShortVersionString: "0.2.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "0.2.1"
+        CFBundleVersion: "2"
         UILaunchScreen:
           UIColorName: LaunchBackground
         UISupportedInterfaceOrientations:
