@@ -157,6 +157,10 @@ final class AppModel {
         if let imogen = error as? ImogenError { return imogen.message }
         if let oauth = error as? OAuthError { return oauth.message }
         if let link = error as? LinkError { return link.localizedDescription }
+        // Anything that took the trouble to describe itself gets to. Without this a
+        // KeychainError — the very failure this app now raises rather than swallows —
+        // came out as "could not reach that server", which is the same lie in a new coat.
+        if let described = (error as? LocalizedError)?.errorDescription { return described }
         return "Could not reach that server. Check the address and try again."
     }
 }
