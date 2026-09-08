@@ -266,20 +266,56 @@ final class PhotoBackup {
             // quota that is full — is recorded against this file. Anything transient is
             // the server's problem, not this file's, and must not spend its attempts.
             if error.isRetryable || error.status == 0 { return .unavailable }
-            await recordFailure(localId, account.id, error.message)
+            await recordFailure(localId, account.id, error.message, file.lastPathComponent)
             return .rejected
         } catch {
-            await recordFailure(localId, account.id, error.localizedDescription)
+            await recordFailure(
+                localId, account.id, error.localizedDescription, file.lastPathComponent
+            )
             return .unavailable
         }
     }
 
-    private func recordFailure(_ localId: String, _ accountId: String, _ message: String) async {
+    private func recordFailure(
+        _ localId: String, _ accountId: String, _ message: String, _ name: String
+    ) async {
         let attempts = await ledger.attempts(localId, for: accountId)
         await ledger.put(
-            UploadRecord(localId: localId, attempts: attempts + 1, lastError: message),
+            UploadRecord(
+                localId: localId,
+                attempts: attempts + 1,
+                lastError: message,
+                // Recorded rather than looked up later: a PHAsset since deleted off the
+                // phone still deserves to be nameable in a list of what went wrong.
+                displayName: name
+            ),
             for: accountId
         )
+    }
+
+    /// Everything outstanding, across every destination.
+    func failures(_ model: AppModel) async -> [(account: Account, record: UploadRecord)] {
+        var all: [(Account, UploadRecord)] = []
+        for account in model.accounts.book.backingUpTo {
+            for record in await ledger.failures(for: account.id) {
+                all.append((account, record))
+            }
+        }
+        return all.sorted { $0.1.uploadedAt > $1.1.uploadedAt }
+    }
+
+    func retry(_ localId: String, for accountId: String, model: AppModel) async {
+        await ledger.retry(localId, for: accountId)
+        await refreshResting(model.accounts.book.backingUpTo)
+        runSoon(model)
+    }
+
+    func retryAll(_ model: AppModel) async {
+        for account in model.accounts.book.backingUpTo {
+            await ledger.retryAll(for: account.id)
+        }
+        await refreshResting(model.accounts.book.backingUpTo)
+        runSoon(model)
     }
 
     // MARK: - The photo library

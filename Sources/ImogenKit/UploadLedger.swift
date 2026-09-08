@@ -17,22 +17,60 @@ public struct UploadRecord: Codable, Hashable, Sendable {
     /// permanently broken file is retried on every single pass.
     public var attempts: Int
     public var lastError: String?
+    /// What the file was called when it was tried. Optional because rows written before
+    /// this existed have none — and because a decoder that refused them would take a
+    /// backup's whole history with it on upgrade.
+    public var displayName: String?
 
     public init(
         localId: String,
         assetId: String? = nil,
         uploadedAt: Double = Date().timeIntervalSince1970,
         attempts: Int = 0,
-        lastError: String? = nil
+        lastError: String? = nil,
+        displayName: String? = nil
     ) {
         self.localId = localId
         self.assetId = assetId
         self.uploadedAt = uploadedAt
         self.attempts = attempts
         self.lastError = lastError
+        self.displayName = displayName
     }
 
     public var isDone: Bool { assetId != nil }
+
+    /// Whether this failure is still in the running.
+    public var failureState: FailureState {
+        attempts >= maxUploadAttempts ? .givenUp : .willRetry
+    }
+
+    /// The local identifier is a poor name, and still better than a blank row.
+    public var name: String { displayName ?? localId }
+}
+
+/// Whether a failed file will be tried again on its own.
+public enum FailureState: Equatable {
+    /// Attempts remain; the next pass picks it up without being asked.
+    case willRetry
+
+    /// Attempts exhausted. `settled(for:)` folds these away, so nothing tries again and
+    /// nothing mentions it — which is how a fixed bug becomes permanently missing
+    /// photographs.
+    case givenUp
+}
+
+public struct FailureSummary: Equatable {
+    public var willRetry: Int
+    public var givenUp: Int
+    public var total: Int { willRetry + givenUp }
+}
+
+public func summarise(_ records: [UploadRecord]) -> FailureSummary {
+    FailureSummary(
+        willRetry: records.filter { $0.failureState == .willRetry }.count,
+        givenUp: records.filter { $0.failureState == .givenUp }.count
+    )
 }
 
 /// How many times a file is retried before it is left alone.
@@ -105,7 +143,8 @@ public actor UploadLedger {
                 assetId: nil,
                 uploadedAt: existing.uploadedAt,
                 attempts: 0,
-                lastError: nil
+                lastError: nil,
+                displayName: existing.displayName
             ),
             for: accountId
         )
