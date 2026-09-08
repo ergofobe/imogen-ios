@@ -112,6 +112,19 @@ struct BackupView: View {
     @Environment(AppModel.self) private var model
     @State private var backupState = PhotoBackup.shared
 
+    private func restingSummary(for accountId: String) -> String {
+        guard let state = backupState.resting[accountId] else { return "Nothing backed up yet" }
+        var parts: [String] = []
+        parts.append(state.backedUp == 0 ? "Nothing backed up yet" : "\(state.backedUp) backed up")
+        if let at = state.lastCompletedAt {
+            let formatter = RelativeDateTimeFormatter()
+            formatter.unitsStyle = .abbreviated
+            parts.append(formatter.localizedString(for: Date(timeIntervalSince1970: at), relativeTo: Date()))
+        }
+        if state.failures > 0 { parts.append("\(state.failures) failed") }
+        return parts.joined(separator: " · ")
+    }
+
     var body: some View {
         @Bindable var settings = model.backup
 
@@ -155,6 +168,12 @@ struct BackupView: View {
                             Text("\(account.name) · \(account.email)")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
+                            // Always something, per destination. A row that goes blank
+                            // between passes cannot tell a finished backup from a
+                            // stalled one, which is the whole complaint.
+                            Text(restingSummary(for: account.id))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
                     }
                     .disabled(!settings.enabled)
@@ -194,5 +213,10 @@ struct BackupView: View {
         }
         .navigationTitle("Photo backup")
         .navigationBarTitleDisplayMode(.inline)
+        .task {
+            // The numbers only move when a pass runs, so this is read on arrival rather
+            // than polled.
+            await PhotoBackup.shared.refreshResting(model.accounts.book.backingUpTo)
+        }
     }
 }
