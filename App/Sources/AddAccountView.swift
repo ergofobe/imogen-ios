@@ -29,9 +29,15 @@ struct AddAccountView: View {
                 }
             }
             .toolbar {
-                if canCancel {
+                // `canCancel` answers "can this sheet be dismissed", which is genuinely
+                // false while somebody is adding their first account — there is nothing
+                // behind it. It is not the same question as "can the scanner go back",
+                // which is always yes: the chooser is right there. Conflating the two
+                // left a black camera screen with no way out but force-quitting, on the
+                // one device most likely to have no camera at all.
+                if canCancel || scanning {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") {
+                        Button(scanning ? "Back" : "Cancel") {
                             scanning ? (scanning = false) : dismiss()
                         }
                     }
