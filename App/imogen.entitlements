@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+		Only what the keychain needs to exist at all. The simulator's securityd refuses
+		every access without an application-identifier, which turns a sign-in into
+		errSecMissingEntitlement three steps from where it is noticed.
+
+		No team prefix: ad-hoc signing needs no identity, and the simulator does not check
+		these against a provisioning profile. A real distribution build replaces them from
+		its own profile.
+	-->
+	<key>application-identifier</key>
+	<string>com.imogen.ios</string>
+	<key>keychain-access-groups</key>
+	<array>
+		<string>com.imogen.ios</string>
+	</array>
+</dict>
+</plist>
