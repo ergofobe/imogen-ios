@@ -34,6 +34,13 @@ final class BackupSettings {
     }
 }
 
+/// One destination, between passes.
+struct RestingState: Equatable {
+    var backedUp: Int
+    var failures: Int
+    var lastCompletedAt: Double?
+}
+
 struct BackupProgress: Equatable {
     var completed: Int
     var total: Int
@@ -59,6 +66,10 @@ final class PhotoBackup {
 
     private(set) var progress: BackupProgress?
     private(set) var lastError: String?
+    /// What each destination holds and when it was last brought up to date. Read at rest,
+    /// which is most of the time — a screen that goes blank between passes cannot tell a
+    /// finished backup from a stalled one.
+    private(set) var resting: [String: RestingState] = [:]
 
     private var running: Task<Void, Never>?
     private let ledger = UploadLedger(directory: URL.applicationSupportDirectory)
@@ -128,7 +139,13 @@ final class PhotoBackup {
     private func run(_ model: AppModel) async {
         lastError = nil
         let destinations = model.accounts.book.backingUpTo
-        guard !destinations.isEmpty else { return }
+        guard !destinations.isEmpty else {
+            // Not an error, but not nothing either: the switch is on and no account was
+            // chosen, which looks identical to working until somebody goes looking.
+            lastError = "No account is set to receive your photographs."
+            return
+        }
+        defer { Task { await self.refreshResting(destinations) } }
 
         guard await requestPhotoAccess() else {
             lastError = "imogen needs access to your photographs to back them up."
@@ -140,7 +157,10 @@ final class PhotoBackup {
             includeVideos: settings.includeVideos,
             cameraOnly: settings.cameraOnly
         )
-        guard !items.isEmpty else { return }
+        guard !items.isEmpty else {
+            await recordCompleted(destinations)
+            return
+        }
 
         var outstanding: [String: Set<String>] = [:]
         for account in destinations {
@@ -150,7 +170,12 @@ final class PhotoBackup {
         let total = destinations.reduce(0) { running, account in
             running + items.filter { !(outstanding[account.id]?.contains($0.localIdentifier) ?? false) }.count
         }
-        guard total > 0 else { return }
+        guard total > 0 else {
+            // Everything already there. Worth recording, because "up to date at 04:12" and
+            // "nothing has ever run" are the two states this screen most needs to separate.
+            await recordCompleted(destinations)
+            return
+        }
 
         var completed = 0
         progress = BackupProgress(completed: 0, total: total, filename: nil)
@@ -177,16 +202,41 @@ final class PhotoBackup {
                 )
 
                 let outcome = await upload(file, item, to: model.session(for: account), account)
-                completed += 1
+                // Only what is dealt with. Counting a transient failure here is what let a
+                // pass in which nothing arrived report the same progress as one that worked.
+                if outcome != .unavailable { completed += 1 }
                 if outcome == .unavailable {
                     // The server or the network is having a bad day. Stop pushing at it;
                     // the next pass will pick up where this one left off.
+                    lastError = "Couldn't reach the server. Backup will carry on later."
                     try? FileManager.default.removeItem(at: file)
                     return
                 }
             }
             if let file { try? FileManager.default.removeItem(at: file) }
         }
+
+        await recordCompleted(destinations)
+    }
+
+    private func recordCompleted(_ destinations: [Account]) async {
+        let now = Date().timeIntervalSince1970
+        for account in destinations {
+            await ledger.recordCompleted(at: now, for: account.id)
+        }
+    }
+
+    /// Refreshed after a pass rather than polled: the numbers only move when one runs.
+    func refreshResting(_ destinations: [Account]) async {
+        var next: [String: RestingState] = [:]
+        for account in destinations {
+            next[account.id] = RestingState(
+                backedUp: await ledger.uploadedCount(for: account.id),
+                failures: await ledger.failures(for: account.id).count,
+                lastCompletedAt: await ledger.lastCompleted(for: account.id)
+            )
+        }
+        resting = next
     }
 
     private enum Outcome { case uploaded, rejected, unavailable }

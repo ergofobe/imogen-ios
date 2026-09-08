@@ -84,6 +84,55 @@ public actor UploadLedger {
         records(for: accountId)[localId]?.attempts ?? 0
     }
 
+    /// Everything outstanding for one account, newest first.
+    public func failures(for accountId: String) -> [UploadRecord] {
+        records(for: accountId).values
+            .filter { !$0.isDone }
+            .sorted { $0.uploadedAt > $1.uploadedAt }
+    }
+
+    /// Puts one file back in the running.
+    ///
+    /// `settled` is computed from the attempt count, so zeroing it is what actually undoes
+    /// the giving-up — anything less leaves the file skipped by every future pass. The
+    /// reason goes with it rather than staying to describe a failure that is no longer the
+    /// current answer.
+    public func retry(_ localId: String, for accountId: String) {
+        guard let existing = records(for: accountId)[localId], !existing.isDone else { return }
+        put(
+            UploadRecord(
+                localId: existing.localId,
+                assetId: nil,
+                uploadedAt: existing.uploadedAt,
+                attempts: 0,
+                lastError: nil
+            ),
+            for: accountId
+        )
+    }
+
+    /// Every failure for this account, back in the running. Anything already uploaded is
+    /// left alone: clearing a done row would send the whole library up again.
+    public func retryAll(for accountId: String) {
+        for record in failures(for: accountId) {
+            retry(record.localId, for: accountId)
+        }
+    }
+
+    /// When this account was last brought up to date. Nil until a pass finishes one.
+    public func lastCompleted(for accountId: String) -> Double? {
+        let url = completedFile(for: accountId)
+        guard let data = try? Data(contentsOf: url),
+            let at = try? JSONDecoder().decode(Double.self, from: data)
+        else { return nil }
+        return at
+    }
+
+    public func recordCompleted(at moment: Double, for accountId: String) {
+        guard let data = try? JSONEncoder().encode(moment) else { return }
+        try? data.write(to: completedFile(for: accountId), options: .atomic)
+    }
+
     public func uploadedCount(for accountId: String) -> Int {
         records(for: accountId).values.count(where: \.isDone)
     }
@@ -91,6 +140,7 @@ public actor UploadLedger {
     public func forget(accountId: String) {
         loaded[accountId] = nil
         try? FileManager.default.removeItem(at: file(for: accountId))
+        try? FileManager.default.removeItem(at: completedFile(for: accountId))
     }
 
     private func persist(_ accountId: String) {
@@ -102,5 +152,12 @@ public actor UploadLedger {
 
     private func file(for accountId: String) -> URL {
         directory.appendingPathComponent("uploads-\(accountId).json")
+    }
+
+    /// Beside the ledger rather than inside it: the ledger's file is a map of records and
+    /// growing a second shape into it would mean migrating something that must never be
+    /// lost, for the sake of one number.
+    private func completedFile(for accountId: String) -> URL {
+        directory.appendingPathComponent("completed-\(accountId).json")
     }
 }
