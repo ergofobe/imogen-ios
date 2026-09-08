@@ -11,6 +11,24 @@ import Security
 /// `afterFirstUnlock` rather than `whenUnlocked`: the backup task runs while the phone is
 /// in a pocket, and a secret it cannot read then is a backup that never happens. Not
 /// synchronised to iCloud, because a grant belongs to the device it was issued to.
+/// A refusal from the keychain, carrying the status that explains it.
+///
+/// Worth raising rather than swallowing: the alternative is a later read coming back empty
+/// and the app blaming whatever asked for it. That is how a store that could not be written
+/// surfaced as "there is no sign-in waiting for this callback" — an error about the wrong
+/// thing, pointing away from the cause.
+public struct KeychainError: Error, LocalizedError, Equatable {
+    public let status: OSStatus
+
+    public init(status: OSStatus) { self.status = status }
+
+    public var errorDescription: String? {
+        let detail = SecCopyErrorMessageString(status, nil) as String?
+        return "The keychain refused to store this (\(status))"
+            + (detail.map { ": \($0)" } ?? "")
+    }
+}
+
 public struct Keychain: Sendable {
     private let service: String
     private let account: String
@@ -40,7 +58,7 @@ public struct Keychain: Sendable {
         return result as? Data
     }
 
-    public func write(_ data: Data) {
+    public func write(_ data: Data) throws {
         let attributes: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
@@ -53,7 +71,8 @@ public struct Keychain: Sendable {
 
         var insert = query
         insert.merge(attributes) { _, new in new }
-        SecItemAdd(insert as CFDictionary, nil)
+        let added = SecItemAdd(insert as CFDictionary, nil)
+        guard added == errSecSuccess else { throw KeychainError(status: added) }
     }
 
     public func delete() {

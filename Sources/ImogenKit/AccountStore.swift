@@ -4,7 +4,7 @@ import Observation
 /// Somewhere to keep the account book. A protocol so tests do not touch the keychain.
 public protocol AccountStorage: Sendable {
     func load() -> AccountBook
-    func save(_ book: AccountBook)
+    func save(_ book: AccountBook) throws
 }
 
 public struct KeychainAccountStorage: AccountStorage {
@@ -19,9 +19,9 @@ public struct KeychainAccountStorage: AccountStorage {
         return (try? JSONDecoder().decode(AccountBook.self, from: data)) ?? AccountBook()
     }
 
-    public func save(_ book: AccountBook) {
+    public func save(_ book: AccountBook) throws {
         guard let data = try? JSONEncoder().encode(book) else { return }
-        keychain.write(data)
+        try keychain.write(data)
     }
 }
 
@@ -52,6 +52,12 @@ public final class MemoryAccountStorage: AccountStorage, @unchecked Sendable {
 @Observable
 public final class AccountStore {
     public private(set) var book: AccountBook
+
+    /// Set when the accounts could not be written. Not thrown from the mutators, whose
+    /// thirteen call sites are all SwiftUI actions — but recorded rather than discarded,
+    /// because an account that appears to save and does not is the same silence that made
+    /// #17 undiagnosable. Surfacing it is #19.
+    public private(set) var lastSaveError: Error?
 
     private let storage: AccountStorage
 
@@ -89,6 +95,11 @@ public final class AccountStore {
         var updated = book
         change(&updated)
         book = updated
-        storage.save(updated)
+        do {
+            try storage.save(updated)
+            lastSaveError = nil
+        } catch {
+            lastSaveError = error
+        }
     }
 }

@@ -98,7 +98,10 @@ public struct AccountLinker: Sendable {
             clientId: registered.clientId, redirectURI: oauthRedirect, scopes: mobileScopes
         )
 
-        remember(
+        // Loudly, and before the browser opens. A verifier that could not be stored means
+        // the callback has nothing to come back to, and letting the sheet appear anyway
+        // spends somebody's sign-in on a flow that was already lost.
+        try remember(
             Pending(
                 serverURL: serverURL,
                 clientId: pending.clientId,
@@ -164,9 +167,11 @@ public struct AccountLinker: Sendable {
         )
     }
 
-    private func remember(_ pending: Pending) {
-        guard let data = try? JSONEncoder().encode(pending) else { return }
-        pendingStore.write(data)
+    private func remember(_ pending: Pending) throws {
+        guard let data = try? JSONEncoder().encode(pending) else {
+            throw LinkError.server("Could not prepare the sign-in to be stored.")
+        }
+        try pendingStore.write(data)
     }
 
     private func recall() -> Pending? {
