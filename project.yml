@@ -79,9 +79,14 @@ targets:
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
-        # There is no team here, and CI builds for the simulator, which needs none.
-        CODE_SIGNING_ALLOWED: NO
-        CODE_SIGNING_REQUIRED: NO
+        # Ad-hoc, which needs no team and no Apple account — but signed rather than not,
+        # because the simulator's keychain refuses every write without an
+        # application-identifier. Unsigned builds compile perfectly and cannot sign in:
+        # the verifier is never stored, and the callback comes back to nothing.
+        CODE_SIGNING_ALLOWED: YES
+        CODE_SIGNING_REQUIRED: YES
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_ENTITLEMENTS: App/imogen.entitlements
 
 schemes:
   imogen:
