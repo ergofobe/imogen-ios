@@ -13,6 +13,7 @@
 		13C5DC30BEC434B9EFF8EB10 /* SearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDBC279AD936B5C59F1D0074 /* SearchView.swift */; };
 		2AA909F895E515C6CA5BC181 /* WebAuthenticator.swift in Sources */ = {isa = PBXBuildFile; fileRef = AE7649EE829A249442B79B5E /* WebAuthenticator.swift */; };
 		2E2B21359FE4953A9874AD70 /* ViewerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47F011A11FB1955FFFC88636 /* ViewerView.swift */; };
+		35C328C1FA8D7DE7A2E2FAF3 /* FailedUploadsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ADA836BBF33106719F01810C /* FailedUploadsView.swift */; };
 		453F801CB55594BB88BB2832 /* PeopleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 655267647D558F1B1E3B651F /* PeopleView.swift */; };
 		4EAC70330FAEEC5DD639DCC5 /* FeedGridView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74979BF56C5FA4D0C1B72882 /* FeedGridView.swift */; };
 		51691CD8A6B8179E7D939DE4 /* AlbumsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11971EE2C333EBA14166248F /* AlbumsView.swift */; };
@@ -44,6 +45,7 @@
 		881E8177F8BB5D6F6C7EA50B /* imogen.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = imogen.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		9C5F7DF0E36EB754FF20A95C /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		9FAFAE43D59CC519AAE5A59E /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		ADA836BBF33106719F01810C /* FailedUploadsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FailedUploadsView.swift; sourceTree = "<group>"; };
 		AE7649EE829A249442B79B5E /* WebAuthenticator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebAuthenticator.swift; sourceTree = "<group>"; };
 		B2A2C80ECC6B7FEB2C507392 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		C1E59DB8C9FF5AD8937F1B19 /* AddAccountView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AddAccountView.swift; sourceTree = "<group>"; };
@@ -73,6 +75,7 @@
 				11971EE2C333EBA14166248F /* AlbumsView.swift */,
 				9C5F7DF0E36EB754FF20A95C /* AppModel.swift */,
 				50E73471108CA3220A97D011 /* DetailsView.swift */,
+				ADA836BBF33106719F01810C /* FailedUploadsView.swift */,
 				74979BF56C5FA4D0C1B72882 /* FeedGridView.swift */,
 				832A39F8A3139CF45BF6590D /* ImogenApp.swift */,
 				655267647D558F1B1E3B651F /* PeopleView.swift */,
@@ -214,6 +217,7 @@
 				51691CD8A6B8179E7D939DE4 /* AlbumsView.swift in Sources */,
 				0798E482F380AE35E94635C2 /* AppModel.swift in Sources */,
 				A0CF929F9CB208A592AE644B /* DetailsView.swift in Sources */,
+				35C328C1FA8D7DE7A2E2FAF3 /* FailedUploadsView.swift in Sources */,
 				4EAC70330FAEEC5DD639DCC5 /* FeedGridView.swift in Sources */,
 				B3B46ECAAFCCA54597B69998 /* ImogenApp.swift in Sources */,
 				453F801CB55594BB88BB2832 /* PeopleView.swift in Sources */,

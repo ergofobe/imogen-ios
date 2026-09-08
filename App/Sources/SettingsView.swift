@@ -112,6 +112,10 @@ struct BackupView: View {
     @Environment(AppModel.self) private var model
     @State private var backupState = PhotoBackup.shared
 
+    private var failureCount: Int {
+        backupState.resting.values.reduce(0) { $0 + $1.failures }
+    }
+
     private func restingSummary(for accountId: String) -> String {
         guard let state = backupState.resting[accountId] else { return "Nothing backed up yet" }
         var parts: [String] = []
@@ -200,6 +204,18 @@ struct BackupView: View {
             if let error = backupState.lastError {
                 Section {
                     Text(error).foregroundStyle(.red).font(.footnote)
+                }
+            }
+
+            if failureCount > 0 {
+                Section {
+                    NavigationLink {
+                        FailedUploadsView()
+                    } label: {
+                        // Given-up files are named first: they are the ones nothing else
+                        // will ever mention again.
+                        Text("\(failureCount) couldn't be backed up")
+                    }
                 }
             }
 
