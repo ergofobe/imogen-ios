@@ -30,6 +30,9 @@ struct Scrubber: View {
     /// Where the thumb was when the finger took hold of it. The drag is measured from
     /// there, so the thumb moves with the finger rather than snapping under it on touch.
     @State private var startFraction: Double = 0
+    /// Whether the finger has moved since it took hold. A touch that only takes hold and
+    /// lets go must leave the grid exactly where it was.
+    @State private var moved = false
 
     private let thumbHeight: Double = 48
     /// The least a finger can be asked to hit. The visible thumb is smaller than this.
@@ -156,17 +159,19 @@ struct Scrubber: View {
                     dragDay = day
                     startFraction = layout.fraction(ofDay: day)
                     dragFraction = startFraction
+                    moved = false
                     return
                 }
                 // Measured by translation, which a thumb that moves under the finger
                 // cannot disturb; a location in the thumb's own space would chase itself.
+                moved = true
                 update(to: startFraction + value.translation.height / travel)
             }
             .onEnded { _ in
                 isScrubbing = false
                 // Seek once more on release: the grid only fetches days when the drag
                 // stops, so this is the request that actually matters.
-                onSeek(dragDay)
+                if moved { onSeek(dragDay) }
             }
     }
 
