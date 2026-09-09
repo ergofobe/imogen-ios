@@ -27,15 +27,14 @@ struct Scrubber: View {
     /// What the label says while dragging. Held separately so it does not flicker back to
     /// the settled day between the drag ending and the grid arriving.
     @State private var dragDay: Int = 0
-    /// How far below the thumb's centre the finger took hold of it. Kept for the whole
-    /// drag so the thumb moves with the finger rather than snapping under it on touch.
-    @State private var grabOffset: Double = 0
+    /// Where the thumb was when the finger took hold of it. The drag is measured from
+    /// there, so the thumb moves with the finger rather than snapping under it on touch.
+    @State private var startFraction: Double = 0
 
     private let thumbHeight: Double = 48
+    /// The least a finger can be asked to hit. The visible thumb is smaller than this.
+    private let touchTarget: Double = 48
     private let railWidth: Double = 96
-    /// Locations are read in the rail's space, not the thumb's: the thumb moves with the
-    /// drag, so a location in its own coordinates would chase itself.
-    private let railSpace = "scrubber-rail"
 
     var body: some View {
         if layout.index.isEmpty {
@@ -47,16 +46,13 @@ struct Scrubber: View {
                 let marks = layout.yearMarks(spacedBy: 34, railHeight: travel)
 
                 ZStack(alignment: .topTrailing) {
-                    // Sizes the strip and nothing more. The strip is drawn over the last
-                    // column of the grid, so anything on it that takes a touch is a
-                    // photograph that cannot be tapped; only the thumb does.
-                    Color.clear.allowsHitTesting(false)
+                    // Sizes the strip and takes no touch; see `thumb`.
+                    Color.clear
 
                     years(marks, travel: travel)
                     bubble(fraction: fraction, travel: travel)
                     thumb(fraction: fraction, travel: travel)
                 }
-                .coordinateSpace(name: railSpace)
             }
             .frame(width: railWidth)
         }
@@ -133,7 +129,7 @@ struct Scrubber: View {
             .foregroundStyle(isScrubbing ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
             .shadow(color: .black.opacity(isScrubbing ? 0.2 : 0), radius: 6, y: 2)
             .padding(.trailing, 6)
-            .frame(width: thumbHeight, height: thumbHeight, alignment: .trailing)
+            .frame(width: touchTarget, height: thumbHeight, alignment: .trailing)
             .contentShape(Rectangle())
             .gesture(drag(travel: travel))
             .offset(y: fraction * travel)
@@ -149,17 +145,22 @@ struct Scrubber: View {
     }
 
     private func drag(travel: Double) -> some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .named(railSpace))
+        DragGesture(minimumDistance: 0)
             .onChanged { value in
                 if !isScrubbing {
                     isScrubbing = true
                     UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                    // Taken hold of where it is, not snapped under the finger.
+                    // Taken hold of where it is, not snapped under the finger — and not
+                    // sought yet either: a fraction sent back through the day table can
+                    // round to the day above, and a touch that moves nothing must not.
                     dragDay = day
-                    dragFraction = layout.fraction(ofDay: day)
-                    grabOffset = value.startLocation.y - (dragFraction * travel + thumbHeight / 2)
+                    startFraction = layout.fraction(ofDay: day)
+                    dragFraction = startFraction
+                    return
                 }
-                update(to: (value.location.y - grabOffset - thumbHeight / 2) / travel)
+                // Measured by translation, which a thumb that moves under the finger
+                // cannot disturb; a location in the thumb's own space would chase itself.
+                update(to: startFraction + value.translation.height / travel)
             }
             .onEnded { _ in
                 isScrubbing = false
