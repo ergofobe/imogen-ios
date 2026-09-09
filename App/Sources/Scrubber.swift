@@ -27,9 +27,15 @@ struct Scrubber: View {
     /// What the label says while dragging. Held separately so it does not flicker back to
     /// the settled day between the drag ending and the grid arriving.
     @State private var dragDay: Int = 0
+    /// How far below the thumb's centre the finger took hold of it. Kept for the whole
+    /// drag so the thumb moves with the finger rather than snapping under it on touch.
+    @State private var grabOffset: Double = 0
 
     private let thumbHeight: Double = 48
     private let railWidth: Double = 96
+    /// Locations are read in the rail's space, not the thumb's: the thumb moves with the
+    /// drag, so a location in its own coordinates would chase itself.
+    private let railSpace = "scrubber-rail"
 
     var body: some View {
         if layout.index.isEmpty {
@@ -41,25 +47,18 @@ struct Scrubber: View {
                 let marks = layout.yearMarks(spacedBy: 34, railHeight: travel)
 
                 ZStack(alignment: .topTrailing) {
-                    // The whole strip takes the gesture, so the thumb does not have to be
-                    // hit exactly — it is a small target on a moving list.
-                    Color.clear.contentShape(Rectangle())
+                    // Sizes the strip and nothing more. The strip is drawn over the last
+                    // column of the grid, so anything on it that takes a touch is a
+                    // photograph that cannot be tapped; only the thumb does.
+                    Color.clear.allowsHitTesting(false)
 
                     years(marks, travel: travel)
                     bubble(fraction: fraction, travel: travel)
                     thumb(fraction: fraction, travel: travel)
                 }
-                .gesture(drag(travel: travel))
+                .coordinateSpace(name: railSpace)
             }
             .frame(width: railWidth)
-            .accessibilityElement()
-            .accessibilityLabel("Scroll through time")
-            .accessibilityValue(monthHeading(layout.index.date(ofDay: day)))
-            .accessibilityAdjustableAction { direction in
-                // A year at a time under VoiceOver: the drag gesture is unusable there,
-                // and stepping by day through two decades is not a control either.
-                seekByYear(direction == .increment ? 1 : -1)
-            }
         }
     }
 
@@ -87,6 +86,7 @@ struct Scrubber: View {
                 .offset(y: mark.fraction * travel + thumbHeight / 2 - 10)
                 .allowsHitTesting(false)
         }
+        .accessibilityHidden(true)
         .opacity(isScrubbing ? 1 : 0)
         .animation(.easeOut(duration: 0.18), value: isScrubbing)
     }
@@ -112,8 +112,16 @@ struct Scrubber: View {
             .opacity(isScrubbing ? 1 : 0)
             .animation(.snappy(duration: 0.18), value: isScrubbing)
             .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 
+    /// The thumb, and the whole of what the rail lets a finger take hold of.
+    ///
+    /// An earlier rail took the drag across its full height and width, which read well as
+    /// "the thumb does not have to be hit exactly" and badly as "the last column of
+    /// photographs cannot be tapped": the strip sits over the grid, and a touch stops at
+    /// the first view that claims it. So the thumb is padded out to a 48pt target and
+    /// claims that alone; everything else in the strip falls through to a photograph.
     private func thumb(fraction: Double, travel: Double) -> some View {
         Image(systemName: "line.3.horizontal")
             .font(.system(size: 14, weight: .semibold))
@@ -125,19 +133,33 @@ struct Scrubber: View {
             .foregroundStyle(isScrubbing ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
             .shadow(color: .black.opacity(isScrubbing ? 0.2 : 0), radius: 6, y: 2)
             .padding(.trailing, 6)
-            .offset(y: fraction * travel + 4)
+            .frame(width: thumbHeight, height: thumbHeight, alignment: .trailing)
+            .contentShape(Rectangle())
+            .gesture(drag(travel: travel))
+            .offset(y: fraction * travel)
             .animation(.snappy(duration: 0.18), value: isScrubbing)
-            .allowsHitTesting(false)
+            .accessibilityElement()
+            .accessibilityLabel("Scroll through time")
+            .accessibilityValue(monthHeading(layout.index.date(ofDay: day)))
+            .accessibilityAdjustableAction { direction in
+                // A year at a time under VoiceOver: the drag gesture is unusable there,
+                // and stepping by day through two decades is not a control either.
+                seekByYear(direction == .increment ? 1 : -1)
+            }
     }
 
     private func drag(travel: Double) -> some Gesture {
-        DragGesture(minimumDistance: 0)
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(railSpace))
             .onChanged { value in
                 if !isScrubbing {
                     isScrubbing = true
                     UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    // Taken hold of where it is, not snapped under the finger.
+                    dragDay = day
+                    dragFraction = layout.fraction(ofDay: day)
+                    grabOffset = value.startLocation.y - (dragFraction * travel + thumbHeight / 2)
                 }
-                update(to: (value.location.y - thumbHeight / 2) / travel)
+                update(to: (value.location.y - grabOffset - thumbHeight / 2) / travel)
             }
             .onEnded { _ in
                 isScrubbing = false
