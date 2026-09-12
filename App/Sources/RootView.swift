@@ -83,12 +83,14 @@ extension View {
     /// photograph they are looking at, and a warning waiting at the root of a stack they
     /// are three screens into is one they read after they have been signed out.
     ///
-    /// An overlay along the bottom rather than a top inset. Inset at the top of a stack
-    /// takes the navigation bar's space and the screen loses its title; inset at the root
-    /// keeps the title but does not follow anybody who pushes a screen. The bottom edge
-    /// belongs to no one.
+    /// Along the bottom, and reserving its space rather than floating over it. Inset at
+    /// the top of a stack takes the navigation bar's room and every screen loses its
+    /// title; inset at the stack's root keeps the title but does not follow anybody who
+    /// pushes a screen; an overlay anywhere covers whatever is under it, and this one has
+    /// nothing to tap and does not go away, so it would swallow those touches for good —
+    /// the viewer's own controls sit exactly there. An inset at the bottom moves them up.
     func accountsNotSaved() -> some View {
-        overlay(alignment: .bottom) { SaveFailureBanner() }
+        safeAreaInset(edge: .bottom) { SaveFailureBanner() }
     }
 }
 
