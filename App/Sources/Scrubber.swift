@@ -23,16 +23,13 @@ struct Scrubber: View {
     @Binding var isScrubbing: Bool
     let onSeek: (Int) -> Void
 
-    @State private var dragFraction: Double = 0
-    /// What the label says while dragging. Held separately so it does not flicker back to
-    /// the settled day between the drag ending and the grid arriving.
-    @State private var dragDay: Int = 0
-    /// Where the thumb was when the finger took hold of it. The drag is measured from
-    /// there, so the thumb moves with the finger rather than snapping under it on touch.
-    @State private var startFraction: Double = 0
-    /// Whether the finger has moved since it took hold. A touch that only takes hold and
-    /// lets go must leave the grid exactly where it was.
-    @State private var moved = false
+    /// The drag in progress, and the whole of what the rail knows while one is. Nil at
+    /// rest. Held here rather than read back from `isScrubbing` so that the thumb draws
+    /// from the finger's own position and not from a flag the store also owns.
+    @State private var scrub: ScrubDrag?
+    /// Reset by SwiftUI when the gesture ends *or is cancelled*, which is the only
+    /// difference between the two that reaches this view. See `endIfTakenAway`.
+    @GestureState private var held = false
 
     private let thumbHeight: Double = 48
     /// The least a finger can be asked to hit. The visible thumb is smaller than this.
@@ -45,7 +42,7 @@ struct Scrubber: View {
         } else {
             GeometryReader { proxy in
                 let travel = max(proxy.size.height - thumbHeight, 1)
-                let fraction = isScrubbing ? dragFraction : layout.fraction(ofDay: day)
+                let fraction = scrub?.fraction ?? layout.fraction(ofDay: day)
                 let marks = layout.yearMarks(spacedBy: 34, railHeight: travel)
 
                 ZStack(alignment: .topTrailing) {
@@ -55,6 +52,9 @@ struct Scrubber: View {
                     years(marks, travel: travel)
                     bubble(fraction: fraction, travel: travel)
                     thumb(fraction: fraction, travel: travel)
+                }
+                .onChange(of: held) { _, stillHeld in
+                    if !stillHeld { endIfTakenAway() }
                 }
             }
             .frame(width: railWidth)
@@ -86,8 +86,8 @@ struct Scrubber: View {
                 .allowsHitTesting(false)
         }
         .accessibilityHidden(true)
-        .opacity(isScrubbing ? 1 : 0)
-        .animation(.easeOut(duration: 0.18), value: isScrubbing)
+        .opacity(scrubbing ? 1 : 0)
+        .animation(.easeOut(duration: 0.18), value: scrubbing)
     }
 
     /// The month under the thumb.
@@ -97,7 +97,7 @@ struct Scrubber: View {
     /// pushed the thumb off the screen. So it hangs to the left, from the same offset, and
     /// the rail stays narrow enough not to swallow taps meant for the photographs.
     private func bubble(fraction: Double, travel: Double) -> some View {
-        Text(monthHeading(layout.index.date(ofDay: dragDay)))
+        Text(monthHeading(layout.index.date(ofDay: scrub?.day ?? day)))
             .font(.subheadline.weight(.semibold))
             .lineLimit(1)
             .fixedSize()
@@ -108,8 +108,8 @@ struct Scrubber: View {
             .frame(width: railWidth - 46, alignment: .trailing)
             .padding(.trailing, 46)
             .offset(y: fraction * travel + 4)
-            .opacity(isScrubbing ? 1 : 0)
-            .animation(.snappy(duration: 0.18), value: isScrubbing)
+            .opacity(scrubbing ? 1 : 0)
+            .animation(.snappy(duration: 0.18), value: scrubbing)
             .allowsHitTesting(false)
             .accessibilityHidden(true)
     }
@@ -126,17 +126,17 @@ struct Scrubber: View {
             .font(.system(size: 14, weight: .semibold))
             .frame(width: 30, height: thumbHeight - 8)
             .background(
-                isScrubbing ? AnyShapeStyle(.tint) : AnyShapeStyle(.regularMaterial),
+                scrubbing ? AnyShapeStyle(.tint) : AnyShapeStyle(.regularMaterial),
                 in: Capsule()
             )
-            .foregroundStyle(isScrubbing ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
-            .shadow(color: .black.opacity(isScrubbing ? 0.2 : 0), radius: 6, y: 2)
+            .foregroundStyle(scrubbing ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+            .shadow(color: .black.opacity(scrubbing ? 0.2 : 0), radius: 6, y: 2)
             .padding(.trailing, 6)
             .frame(width: touchTarget, height: thumbHeight, alignment: .trailing)
             .contentShape(Rectangle())
             .gesture(drag(travel: travel))
             .offset(y: fraction * travel)
-            .animation(.snappy(duration: 0.18), value: isScrubbing)
+            .animation(.snappy(duration: 0.18), value: scrubbing)
             .accessibilityElement()
             .accessibilityLabel("Scroll through time")
             .accessibilityValue(monthHeading(layout.index.date(ofDay: day)))
@@ -147,47 +147,61 @@ struct Scrubber: View {
             }
     }
 
+    private var scrubbing: Bool { scrub != nil }
+
     private func drag(travel: Double) -> some Gesture {
         DragGesture(minimumDistance: 0)
+            // Set for as long as the finger is down, and reset by SwiftUI when the
+            // gesture ends *or is cancelled*. It is the only notice a cancellation gives.
+            .updating($held) { _, held, _ in held = true }
             .onChanged { value in
-                if !isScrubbing {
-                    isScrubbing = true
-                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                guard scrub != nil else {
                     // Taken hold of where it is, not snapped under the finger — and not
                     // sought yet either: a fraction sent back through the day table can
                     // round to the day above, and a touch that moves nothing must not.
-                    dragDay = day
-                    startFraction = layout.fraction(ofDay: day)
-                    dragFraction = startFraction
-                    moved = false
+                    scrub = ScrubDrag(fromDay: day, in: layout)
+                    isScrubbing = true
+                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
                     return
                 }
                 // Measured by translation, which a thumb that moves under the finger
                 // cannot disturb; a location in the thumb's own space would chase itself.
-                moved = true
-                update(to: startFraction + value.translation.height / travel)
+                let landing = scrub?.move(
+                    by: value.translation.height, over: travel, in: layout
+                )
+                // Per month, not per day: a decade's worth of days would buzz without
+                // pause. Nothing else happens here — the grid is moved on release.
+                if landing?.crossedMonth == true {
+                    UISelectionFeedbackGenerator().selectionChanged()
+                }
             }
             .onEnded { _ in
-                isScrubbing = false
-                // Seek once more on release: the grid only fetches days when the drag
-                // stops, so this is the request that actually matters.
-                if moved { onSeek(dragDay) }
+                // The one seek of the whole drag. Moving the grid means `scrollTo` on a
+                // lazy container, which lays out every section it passes: once per
+                // release is affordable, once per pointer move was not.
+                let destination = scrub?.finish()
+                end()
+                if let destination { onSeek(destination) }
             }
     }
 
-    private func update(to fraction: Double) {
-        dragFraction = min(max(fraction, 0), 1)
-        let landing = layout.day(atFraction: dragFraction)
-        if landing != dragDay {
-            dragDay = landing
-            // One tick per day crossed would buzz continuously across a decade; per
-            // month is enough to feel the rail moving under a thumb.
-            if monthHeading(layout.index.date(ofDay: landing))
-                != monthHeading(layout.index.date(ofDay: day)) {
-                UISelectionFeedbackGenerator().selectionChanged()
-            }
+    /// Ends a drag that was taken away rather than let go of.
+    ///
+    /// A cancelled gesture gets no `onEnded` at all, so without this `isScrubbing` stays
+    /// true and `TimelineStore.load(around:)` refuses to fetch another day for the rest
+    /// of the session. Deferred by a turn because the same reset also fires on a normal
+    /// end, where `onEnded` has the drag's destination and must be the one to finish it.
+    private func endIfTakenAway() {
+        Task { @MainActor in
+            guard scrubbing else { return }
+            scrub?.cancel()
+            end()
         }
-        onSeek(landing)
+    }
+
+    private func end() {
+        scrub = nil
+        isScrubbing = false
     }
 
     private func seekByYear(_ step: Int) {

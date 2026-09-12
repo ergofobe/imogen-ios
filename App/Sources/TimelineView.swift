@@ -48,8 +48,9 @@ struct TimelineView: View {
     @State private var topDay = 0
     /// The height of the grid, so the rail knows how much of the timeline is on screen.
     @State private var viewportHeight: Double = 0
-    /// Cancelled and restarted on every seek, so a flick across a decade fetches the day
-    /// it stops on rather than every day it passes through.
+    /// Cancelled and restarted on every seek, so stepping the rail repeatedly — which
+    /// VoiceOver does, a year per tap — fetches the day it comes to rest on rather than
+    /// every year it passes through.
     @State private var settle: Task<Void, Never>?
     @State private var gridWidth: Double = 0
 
@@ -180,6 +181,11 @@ struct TimelineView: View {
                     isScrubbing: $store.isScrubbing
                 ) { day in
                     topDay = day
+                    // Once per drag, on release. `scrollTo` on a `LazyVGrid` has to lay
+                    // out every section between here and the target before it knows
+                    // where the target is, so this is the expensive line on the screen
+                    // and the rail is careful to ask for it exactly once — see
+                    // `ScrubDrag`.
                     scroller.scrollTo(day, anchor: .top)
                     // The design's rule: suspend fetching while the rail is moving and
                     // resume shortly after it settles, so a drag across fifteen years
