@@ -211,7 +211,6 @@ final class AccountSaveFailureTests: XCTestCase {
         store.remove("a")
         XCTAssertEqual(store.lastSaveFailure?.change, .removeAccount)
 
-        // Last, because it then outranks anything after it — which is the next test.
         store.add(account("a"))
         XCTAssertEqual(store.lastSaveFailure?.change, .addAccount)
 
@@ -256,51 +255,53 @@ final class AccountSaveFailureTests: XCTestCase {
         XCTAssertNil(store.lastSaveFailure)
     }
 
-    /// Dismissible, because the alternative is a warning that stays until something else
-    /// happens to be saved — on a screen whose whole point is that nothing is being saved.
+    /// The standing warning is not retired by a newer failure — only the consequence
+    /// beside it changes. Suppressing the later one instead was the same loss in the
+    /// other direction: the person acts, nothing is written, and nothing says so.
     @MainActor
-    func testOnlyTheBackgroundRefreshIsUnprompted() {
-        let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
-
-        store.setBackupEnabled("a", true)
-        XCTAssertEqual(store.lastSaveFailure?.isUnprompted, false)
-
-        store.setTokens("a", tokens(obtainedAt: 5))
-        XCTAssertEqual(store.lastSaveFailure?.isUnprompted, true)
-    }
-
-    /// A keychain that refuses one write refuses the next, so the slot would otherwise be
-    /// overwritten by whatever the person touched after — trading "you will be signed
-    /// out" for "a toggle reverted" while they were still reading the first one.
-    @MainActor
-    func testALaterFailureDoesNotBuryTheSignInThatWasNotSaved() {
+    func testALaterFailureMovesTheConsequenceOnAndLeavesTheWarningStanding() {
         let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
 
         store.setTokens("a", tokens(obtainedAt: 5))
-        store.setBackupEnabled("a", true)
-
-        XCTAssertEqual(store.lastSaveFailure?.change, .refreshedTokens)
-    }
-
-    @MainActor
-    func testDismissingTheSignInWarningLetsTheNextFailureThrough() {
-        let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
-
-        store.setTokens("a", tokens(obtainedAt: 5))
-        store.dismissSaveFailure()
         store.setBackupEnabled("a", true)
 
         XCTAssertEqual(store.lastSaveFailure?.change, .backupPreference)
+        XCTAssertTrue(store.cannotSaveAccounts)
     }
 
+    /// Nothing but a write that lands makes the warning untrue, so nothing else takes it
+    /// down: not a different failure, and not the person having read it.
     @MainActor
-    func testTheWarningCanBeDismissed() {
-        let store = AccountStore(storage: RefusingStorage())
+    func testOnlyASaveThatLandsTakesTheWarningDown() {
+        let storage = FlakyStorage()
+        let store = AccountStore(storage: storage)
+
+        storage.refusing = true
         store.add(account("a"))
+        store.setBackupEnabled("a", true)
+        XCTAssertTrue(store.cannotSaveAccounts)
 
-        store.dismissSaveFailure()
+        storage.refusing = false
+        store.setBackupEnabled("a", false)
 
+        XCTAssertFalse(store.cannotSaveAccounts)
         XCTAssertNil(store.lastSaveFailure)
+    }
+
+    /// The standing half says the same thing whichever change failed — that is what makes
+    /// it safe for the consequence beside it to be replaced.
+    @MainActor
+    func testTheStandingLineDoesNotDependOnWhichChangeFailed() {
+        let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
+
+        store.setTokens("a", tokens(obtainedAt: 5))
+        let afterTokens = AccountSaveFailure.standing
+
+        store.setBackupEnabled("a", true)
+
+        XCTAssertEqual(AccountSaveFailure.standing, afterTokens)
+        XCTAssertFalse(AccountSaveFailure.standing.isEmpty)
+        XCTAssertNotEqual(store.lastSaveFailure?.consequence, AccountSaveFailure.standing)
     }
 }
 

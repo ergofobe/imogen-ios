@@ -50,17 +50,45 @@ struct RootView: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if let account = model.active {
-            LibraryView(account: account)
-                // A different account is a different library: rebuilding the whole tree
-                // is what guarantees no screen is left showing the last one's photographs.
-                .id(account.id)
-        } else {
-            // Signing out the last account is a save like any other, and this is the
-            // only screen left to say it did not land on.
-            AddAccountView()
-                .safeAreaInset(edge: .top) { SaveFailureBanner() }
+        Group {
+            if let account = model.active {
+                LibraryView(account: account)
+                    // A different account is a different library: rebuilding the whole
+                    // tree is what guarantees no screen is left showing the last one's
+                    // photographs.
+                    .id(account.id)
+            } else {
+                // Signing out the last account is a save like any other, and this is the
+                // only screen left to say it did not land on.
+                AddAccountView().accountsNotSaved()
+            }
         }
+        // Announced once, here, rather than by the banner: the banner is attached in
+        // several places at a time — a stack, and the viewer presented over it — and each
+        // of them announcing would say it twice to somebody who cannot see either.
+        .onChange(of: model.accounts.lastSaveFailure?.consequence) { _, consequence in
+            guard let consequence else { return }
+            AccessibilityNotification.Announcement(
+                "\(AccountSaveFailure.standing) \(consequence)"
+            ).post()
+        }
+    }
+}
+
+extension View {
+    /// Says, wherever this is, that the accounts are not reaching the keychain.
+    ///
+    /// Applied to whole navigation stacks and to anything presented over one, because a
+    /// write fails where the person happens to be: a token refresh runs behind the
+    /// photograph they are looking at, and a warning waiting at the root of a stack they
+    /// are three screens into is one they read after they have been signed out.
+    ///
+    /// An overlay along the bottom rather than a top inset. Inset at the top of a stack
+    /// takes the navigation bar's space and the screen loses its title; inset at the root
+    /// keeps the title but does not follow anybody who pushes a screen. The bottom edge
+    /// belongs to no one.
+    func accountsNotSaved() -> some View {
+        overlay(alignment: .bottom) { SaveFailureBanner() }
     }
 }
 
@@ -100,6 +128,7 @@ private struct LibraryView: View {
                 NavigationStack {
                     content(entry, session, columns: 3)
                 }
+                .accountsNotSaved()
                 .tabItem { Label(entry.label, systemImage: entry.icon) }
                 .tag(entry)
             }
@@ -122,18 +151,12 @@ private struct LibraryView: View {
             NavigationStack {
                 content(destination, session, columns: 6)
             }
+            .accountsNotSaved()
         }
     }
 
-    private func content(_ entry: Destination, _ session: Session, columns: Int) -> some View {
-        // Inside the navigation stack rather than around the tab bar, so the banner sits
-        // under the title bar instead of on top of the title.
-        destination(entry, session, columns: columns)
-            .safeAreaInset(edge: .top) { SaveFailureBanner() }
-    }
-
     @ViewBuilder
-    private func destination(_ entry: Destination, _ session: Session, columns: Int) -> some View {
+    private func content(_ entry: Destination, _ session: Session, columns: Int) -> some View {
         switch entry {
         case .photos:
             TimelineHost(session: session, columns: columns) { pickingAlbumFor = $0 }
@@ -399,33 +422,42 @@ private struct AlbumPickerHost: View {
     }
 }
 
-/// The accounts could not be written to the keychain.
+/// The accounts are not reaching the keychain.
 ///
-/// Above whatever is on screen rather than in Settings, because four of the five changes
-/// move which account is active — and that rebuilds the whole tree back to the photographs,
-/// carrying anybody who was in Settings out of it before they could read a word.
+/// Two lines, because they answer different questions and go stale at different times. The
+/// standing one is true until a write lands; the consequence below it is about the most
+/// recent change, and a later failure is allowed to replace it — which is only safe
+/// because the line above does not move.
+///
+/// Not dismissible. The thing it reports is still true after it is read, and a warning
+/// that can be put away while it remains true is the silence this exists to break.
 private struct SaveFailureBanner: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         if let failure = model.accounts.lastSaveFailure {
             HStack(alignment: .top, spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 2) {
+                    Text(AccountSaveFailure.standing).foregroundStyle(.red)
                     Text(failure.consequence)
                     Text(failure.reason).foregroundStyle(.secondary)
                 }
 
                 Spacer(minLength: 0)
-
-                Button("Dismiss") { model.accounts.dismissSaveFailure() }
             }
             .font(.caption)
+            .padding(12)
+            .background(.thinMaterial, in: .rect(cornerRadius: 12))
             .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .frame(maxWidth: .infinity)
-            .background(.thinMaterial)
+            .padding(.bottom, 8)
+            // One element: three separate labels make somebody swipe through a warning
+            // three times to learn one thing.
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isStaticText)
         }
     }
 }

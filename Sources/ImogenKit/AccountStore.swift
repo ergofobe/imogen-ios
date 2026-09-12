@@ -57,7 +57,8 @@ public final class AccountStore {
     /// Set when the accounts could not be written. Not thrown from the mutators, whose
     /// thirteen call sites are all SwiftUI actions — but recorded rather than discarded,
     /// because an account that appears to save and does not is the same silence that made
-    /// #17 undiagnosable. A banner over whatever is on screen reads it and says so.
+    /// #17 undiagnosable. A banner over whatever is on screen reads it and says so, and
+    /// stays up until a write lands — see `AccountSaveFailure.standing`.
     public private(set) var lastSaveFailure: AccountSaveFailure?
 
     private let storage: AccountStorage
@@ -92,11 +93,12 @@ public final class AccountStore {
         mutate(.refreshedTokens) { $0.update(id: id) { $0.tokens = tokens } }
     }
 
-    /// Puts the warning away. A failure that could only be cleared by a later successful
-    /// write would sit there indefinitely, since nothing writes unless somebody acts.
-    public func dismissSaveFailure() {
-        lastSaveFailure = nil
-    }
+    /// Whether the accounts are reaching the keychain at all.
+    ///
+    /// Stays true across however many failures follow — only a write that lands makes it
+    /// untrue, and nothing else takes it down. The failure beside it names the most recent
+    /// change, and that one is allowed to move on.
+    public var cannotSaveAccounts: Bool { lastSaveFailure != nil }
 
     /// The book advances whether or not the write lands, and deliberately.
     ///
@@ -113,10 +115,6 @@ public final class AccountStore {
             try storage.save(updated)
             lastSaveFailure = nil
         } catch {
-            // A keychain that refused one write refuses the next, and the person may still
-            // be reading the first. The unprompted one outranks whatever they touched
-            // after it, because it is the one nothing else will bring them back to.
-            guard lastSaveFailure?.isUnprompted != true else { return }
             lastSaveFailure = AccountSaveFailure(change: change, error: error)
         }
     }
@@ -142,6 +140,15 @@ public struct AccountSaveFailure {
         self.error = error
     }
 
+    /// The half that is true of every failed save, and stays true until one lands.
+    ///
+    /// Said alongside the consequence rather than instead of it: a second failure replaces
+    /// what is being warned about, and without this line it would also replace the warning
+    /// — trading "this account will be signed out" for "a toggle reverted" while the first
+    /// was still being read.
+    public static let standing = "imogen cannot save your accounts on this device. "
+        + "Nothing you change is being kept."
+
     /// What the next launch will look like. Always the next launch: until then the app
     /// holds the change in memory and behaves as though it saved, which is exactly why
     /// the divergence needs saying now rather than being discovered later.
@@ -163,13 +170,6 @@ public struct AccountSaveFailure {
                 + "starts again."
         }
     }
-
-    /// Whether anything the person did asked for this write.
-    ///
-    /// A renewed token is written behind whatever they are doing; the other four follow
-    /// something they just did and will notice. So this one outranks a later failure —
-    /// nothing else is going to bring them back to it.
-    public var isUnprompted: Bool { change == .refreshedTokens }
 
     /// What the keychain said. A locked device and a full one need different answers from
     /// the person, so the status travels rather than being flattened to "could not save".
