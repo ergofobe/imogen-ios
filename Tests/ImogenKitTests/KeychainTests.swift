@@ -62,6 +62,23 @@ final class KeychainTests: XCTestCase {
     }
 
 
+    /// The whole of the bug: any refusal used to fall through to `SecItemAdd`, whose
+    /// errSecDuplicateItem then stood in for whatever actually went wrong. A locked
+    /// device is the commonest refusal and the one on every token refresh, so the status
+    /// it reported was wrong exactly when somebody needed it.
+    func testARefusedUpdateIsRaisedRatherThanRetriedAsAnInsert() {
+        XCTAssertThrowsError(
+            try Keychain.insertIsNext(afterUpdate: errSecInteractionNotAllowed)
+        ) { error in
+            XCTAssertEqual(error as? KeychainError, KeychainError(status: errSecInteractionNotAllowed))
+        }
+    }
+
+    func testNothingStoredYetIsTheOneCaseThatInserts() throws {
+        XCTAssertTrue(try Keychain.insertIsNext(afterUpdate: errSecItemNotFound))
+        XCTAssertFalse(try Keychain.insertIsNext(afterUpdate: errSecSuccess))
+    }
+
     /// The encode was `try?`, so a book that would not serialise returned as though it
     /// had been written — and the store then cleared its own warning. A save that cannot
     /// save has to say so, whichever half of it failed.

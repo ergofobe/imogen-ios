@@ -202,9 +202,6 @@ final class AccountSaveFailureTests: XCTestCase {
     func testEachMutatorNamesItsOwnConsequence() {
         let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
 
-        store.setTokens("a", tokens(obtainedAt: 5))
-        XCTAssertEqual(store.lastSaveFailure?.change, .refreshedTokens)
-
         store.setBackupEnabled("a", true)
         XCTAssertEqual(store.lastSaveFailure?.change, .backupPreference)
 
@@ -213,6 +210,13 @@ final class AccountSaveFailureTests: XCTestCase {
 
         store.remove("a")
         XCTAssertEqual(store.lastSaveFailure?.change, .removeAccount)
+
+        // Last, because it then outranks anything after it — which is the next test.
+        store.add(account("a"))
+        XCTAssertEqual(store.lastSaveFailure?.change, .addAccount)
+
+        store.setTokens("a", tokens(obtainedAt: 5))
+        XCTAssertEqual(store.lastSaveFailure?.change, .refreshedTokens)
     }
 
     /// Every consequence is about the next launch, which is when the divergence shows.
@@ -254,18 +258,39 @@ final class AccountSaveFailureTests: XCTestCase {
 
     /// Dismissible, because the alternative is a warning that stays until something else
     /// happens to be saved — on a screen whose whole point is that nothing is being saved.
-    /// The banner over the library is for the failure nothing on screen is about; every
-    /// other one belongs to the screen the person acted on, and saying it twice at once is
-    /// what happens if both read the same flag.
     @MainActor
-    func testOnlyTheBackgroundRefreshIsWorthInterruptingWhateverIsOnScreen() {
+    func testOnlyTheBackgroundRefreshIsUnprompted() {
         let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
-
-        store.setTokens("a", tokens(obtainedAt: 5))
-        XCTAssertEqual(store.lastSaveFailure?.isUnprompted, true)
 
         store.setBackupEnabled("a", true)
         XCTAssertEqual(store.lastSaveFailure?.isUnprompted, false)
+
+        store.setTokens("a", tokens(obtainedAt: 5))
+        XCTAssertEqual(store.lastSaveFailure?.isUnprompted, true)
+    }
+
+    /// A keychain that refuses one write refuses the next, so the slot would otherwise be
+    /// overwritten by whatever the person touched after — trading "you will be signed
+    /// out" for "a toggle reverted" while they were still reading the first one.
+    @MainActor
+    func testALaterFailureDoesNotBuryTheSignInThatWasNotSaved() {
+        let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
+
+        store.setTokens("a", tokens(obtainedAt: 5))
+        store.setBackupEnabled("a", true)
+
+        XCTAssertEqual(store.lastSaveFailure?.change, .refreshedTokens)
+    }
+
+    @MainActor
+    func testDismissingTheSignInWarningLetsTheNextFailureThrough() {
+        let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
+
+        store.setTokens("a", tokens(obtainedAt: 5))
+        store.dismissSaveFailure()
+        store.setBackupEnabled("a", true)
+
+        XCTAssertEqual(store.lastSaveFailure?.change, .backupPreference)
     }
 
     @MainActor

@@ -113,6 +113,10 @@ public final class AccountStore {
             try storage.save(updated)
             lastSaveFailure = nil
         } catch {
+            // A keychain that refused one write refuses the next, and the person may still
+            // be reading the first. The unprompted one outranks whatever they touched
+            // after it, because it is the one nothing else will bring them back to.
+            guard lastSaveFailure?.isUnprompted != true else { return }
             lastSaveFailure = AccountSaveFailure(change: change, error: error)
         }
     }
@@ -146,11 +150,8 @@ public struct AccountSaveFailure {
         case .addAccount:
             "This account is not saved, and will be gone when imogen starts again."
         case .removeAccount:
-            // Back, but not working: the grant is revoked on the server before the
-            // account is dropped here, so what returns is a row that has to be signed
-            // out again.
             "Signing out is not saved. The account will be back when imogen starts again, "
-                + "already signed out, and will have to be removed again."
+                + "and will have to be signed out again."
         case .switchAccount:
             "The account you switched to is not saved, and imogen will start again on the "
                 + "previous one."
@@ -163,11 +164,11 @@ public struct AccountSaveFailure {
         }
     }
 
-    /// Whether anything on screen is already about this.
+    /// Whether anything the person did asked for this write.
     ///
-    /// A renewed token is written behind whatever the person is doing, and losing it signs
-    /// them out at the next launch — nothing would send them to Settings to find that out.
-    /// The other four follow something they just did, on the screen they did it on.
+    /// A renewed token is written behind whatever they are doing; the other four follow
+    /// something they just did and will notice. So this one outranks a later failure —
+    /// nothing else is going to bring them back to it.
     public var isUnprompted: Bool { change == .refreshedTokens }
 
     /// What the keychain said. A locked device and a full one need different answers from

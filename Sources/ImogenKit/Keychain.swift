@@ -67,16 +67,24 @@ public struct Keychain: Sendable {
         // Update first: adding over an existing item fails rather than replacing it, and
         // the update path is the one that runs on every token refresh.
         let updated = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
-        if updated == errSecSuccess { return }
-        // Only "there is nothing here yet" means try adding. Falling through on any
-        // refusal turned a locked device — the commonest one — into the add's
-        // errSecDuplicateItem, which is the wrong status and points at the wrong fix.
-        guard updated == errSecItemNotFound else { throw KeychainError(status: updated) }
+        guard try Keychain.insertIsNext(afterUpdate: updated) else { return }
 
         var insert = query
         insert.merge(attributes) { _, new in new }
         let added = SecItemAdd(insert as CFDictionary, nil)
         guard added == errSecSuccess else { throw KeychainError(status: added) }
+    }
+
+    /// What the status from `SecItemUpdate` means for the write.
+    ///
+    /// Only "there is nothing here yet" means adding is the next step. Falling through on
+    /// any refusal reported the add's errSecDuplicateItem instead — so a locked device,
+    /// the commonest refusal and the one on every token refresh, came back as a status
+    /// about the wrong thing entirely.
+    static func insertIsNext(afterUpdate status: OSStatus) throws -> Bool {
+        if status == errSecSuccess { return false }
+        guard status == errSecItemNotFound else { throw KeychainError(status: status) }
+        return true
     }
 
     public func delete() {

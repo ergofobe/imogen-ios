@@ -56,7 +56,10 @@ struct RootView: View {
                 // is what guarantees no screen is left showing the last one's photographs.
                 .id(account.id)
         } else {
+            // Signing out the last account is a save like any other, and this is the
+            // only screen left to say it did not land on.
             AddAccountView()
+                .safeAreaInset(edge: .top) { SaveFailureBanner() }
         }
     }
 }
@@ -125,14 +128,9 @@ private struct LibraryView: View {
     private func content(_ entry: Destination, _ session: Session, columns: Int) -> some View {
         // Inside the navigation stack rather than around the tab bar, so the banner sits
         // under the title bar instead of on top of the title.
+        //
         destination(entry, session, columns: columns)
-            .safeAreaInset(edge: .top) {
-                if let failure = model.accounts.lastSaveFailure, failure.isUnprompted {
-                    SignInNotSavedBanner(failure: failure) {
-                        model.accounts.dismissSaveFailure()
-                    }
-                }
-            }
+            .safeAreaInset(edge: .top) { SaveFailureBanner() }
     }
 
     @ViewBuilder
@@ -403,33 +401,33 @@ private struct AlbumPickerHost: View {
 }
 
 
-/// A renewed sign-in that could not be written, said wherever somebody happens to be.
+/// The accounts could not be written to the keychain.
 ///
-/// Every other save failure waits in Settings, which is the screen it is about. This one
-/// cannot: it is set by a token refresh running behind whatever is on screen, and what it
-/// costs is being signed out at the next launch — by which time nobody has any reason to
-/// have gone looking in Settings.
-private struct SignInNotSavedBanner: View {
-    let failure: AccountSaveFailure
-    let dismiss: () -> Void
+/// Above whatever is on screen rather than in Settings, because four of the five changes
+/// move which account is active — and that rebuilds the whole tree back to the photographs,
+/// carrying anybody who was in Settings out of it before they could read a word.
+private struct SaveFailureBanner: View {
+    @Environment(AppModel.self) private var model
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+        if let failure = model.accounts.lastSaveFailure {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(failure.consequence)
-                Text(failure.reason).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(failure.consequence)
+                    Text(failure.reason).foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 0)
+
+                Button("Dismiss") { model.accounts.dismissSaveFailure() }
             }
-
-            Spacer(minLength: 0)
-
-            Button("Dismiss", action: dismiss)
+            .font(.caption)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(.thinMaterial)
         }
-        .font(.caption)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity)
-        .background(.thinMaterial)
     }
 }
