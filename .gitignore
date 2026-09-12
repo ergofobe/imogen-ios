@@ -10,9 +10,12 @@ Package.resolved
 xcuserdata/
 *.xcuserstate
 DerivedData/
-*.xcworkspace/xcshareddata/IDEWorkspaceChecks.plist
 
 # The project file is generated from project.yml but is committed, so that opening the
 # repository in Xcode works without installing anything first. Its per-user parts are not.
+# Opening it makes Xcode write a WorkspaceSettings and a checks plist into the workspace's
+# shared data; XcodeGen generates nothing in any of these, so none of it is worth sharing.
+# Anchor every path: a leading *.xcworkspace/ would only match one at the repository root.
+imogen.xcodeproj/project.xcworkspace/xcshareddata/
 imogen.xcodeproj/project.xcworkspace/xcuserdata/
 imogen.xcodeproj/xcuserdata/
