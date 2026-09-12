@@ -1,3 +1,4 @@
+import Security
 import XCTest
 
 @testable import ImogenKit
@@ -157,5 +158,122 @@ final class AccountStorageTests: XCTestCase {
         store.setBackupEnabled("a", true)
 
         XCTAssertEqual(store.book.backingUpTo.map(\.id), ["a"])
+    }
+}
+
+/// Storage that refuses, which is what a locked or full keychain looks like from here.
+/// The real refusal cannot be forced portably, so the protocol is the seam.
+private struct RefusingStorage: AccountStorage {
+    let book: AccountBook
+
+    init(_ book: AccountBook = AccountBook()) { self.book = book }
+
+    func load() -> AccountBook { book }
+
+    func save(_ book: AccountBook) throws {
+        throw KeychainError(status: errSecInteractionNotAllowed)
+    }
+}
+
+final class AccountSaveFailureTests: XCTestCase {
+
+    @MainActor
+    func testAFailedSaveIsRecordedWithWhatWasBeingSaved() {
+        let store = AccountStore(storage: RefusingStorage())
+
+        store.add(account("a"))
+
+        XCTAssertEqual(store.lastSaveFailure?.change, .addAccount)
+    }
+
+    /// The book is not rolled back. A refreshed token that cannot be written is still the
+    /// only one that works this session; discarding it would sign the person out now
+    /// rather than at relaunch, and tell them nothing either way.
+    @MainActor
+    func testTheInMemoryBookKeepsTheChangeThatCouldNotBeWritten() {
+        let store = AccountStore(storage: RefusingStorage())
+
+        store.add(account("a"))
+
+        XCTAssertEqual(store.accounts.map(\.id), ["a"])
+    }
+
+    @MainActor
+    func testEachMutatorNamesItsOwnConsequence() {
+        let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
+
+        store.setTokens("a", tokens(obtainedAt: 5))
+        XCTAssertEqual(store.lastSaveFailure?.change, .refreshedTokens)
+
+        store.setBackupEnabled("a", true)
+        XCTAssertEqual(store.lastSaveFailure?.change, .backupPreference)
+
+        store.setActive("a")
+        XCTAssertEqual(store.lastSaveFailure?.change, .switchAccount)
+
+        store.remove("a")
+        XCTAssertEqual(store.lastSaveFailure?.change, .removeAccount)
+    }
+
+    /// Every consequence is about the next launch, which is when the divergence shows.
+    @MainActor
+    func testTheConsequenceSaysWhatTheNextLaunchWillLookLike() {
+        let store = AccountStore(storage: RefusingStorage())
+        store.add(account("a"))
+
+        XCTAssertTrue(store.lastSaveFailure?.consequence.contains("starts again") == true)
+    }
+
+    /// The keychain's own status is what distinguishes a locked device from a full one,
+    /// so it travels with the failure rather than being flattened to "could not save".
+    @MainActor
+    func testTheReasonCarriesWhatTheKeychainSaid() {
+        let store = AccountStore(storage: RefusingStorage())
+        store.add(account("a"))
+
+        XCTAssertEqual(
+            store.lastSaveFailure?.reason,
+            KeychainError(status: errSecInteractionNotAllowed).errorDescription
+        )
+    }
+
+    @MainActor
+    func testASaveThatWorksClearsTheOneThatDidNot() {
+        let storage = FlakyStorage()
+        let store = AccountStore(storage: storage)
+
+        storage.refusing = true
+        store.add(account("a"))
+        XCTAssertNotNil(store.lastSaveFailure)
+
+        storage.refusing = false
+        store.setBackupEnabled("a", true)
+
+        XCTAssertNil(store.lastSaveFailure)
+    }
+
+    /// Dismissible, because the alternative is a warning that stays until something else
+    /// happens to be saved — on a screen whose whole point is that nothing is being saved.
+    @MainActor
+    func testTheWarningCanBeDismissed() {
+        let store = AccountStore(storage: RefusingStorage())
+        store.add(account("a"))
+
+        store.dismissSaveFailure()
+
+        XCTAssertNil(store.lastSaveFailure)
+    }
+}
+
+private final class FlakyStorage: AccountStorage, @unchecked Sendable {
+    private let lock = NSLock()
+    private var book = AccountBook()
+    var refusing = false
+
+    func load() -> AccountBook { lock.withLock { book } }
+
+    func save(_ book: AccountBook) throws {
+        if refusing { throw KeychainError(status: errSecInteractionNotAllowed) }
+        lock.withLock { self.book = book }
     }
 }

@@ -40,6 +40,12 @@ struct SettingsView: View {
                 } label: {
                     Label("Add an account", systemImage: "plus")
                 }
+
+                if let failure = model.accounts.lastSaveFailure {
+                    SaveFailureRow(failure: failure) {
+                        model.accounts.dismissSaveFailure()
+                    }
+                }
             }
 
             Section("Backup") {
@@ -234,5 +240,31 @@ struct BackupView: View {
             // than polled.
             await PhotoBackup.shared.refreshResting(model.accounts.book.backingUpTo)
         }
+    }
+}
+
+/// The accounts could not be written to the keychain.
+///
+/// In the accounts section rather than a banner: it is a warning about what is on disk,
+/// not about anything the person is doing right now, and the screen it belongs to is the
+/// one that shows the accounts it is about.
+private struct SaveFailureRow: View {
+    let failure: AccountSaveFailure
+    let dismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(failure.consequence, systemImage: "exclamationmark.triangle.fill")
+                .font(.footnote)
+                .foregroundStyle(.red)
+
+            Text(failure.reason)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button("Dismiss", action: dismiss)
+                .font(.caption)
+        }
+        .padding(.vertical, 2)
     }
 }
