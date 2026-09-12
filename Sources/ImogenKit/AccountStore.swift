@@ -20,8 +20,9 @@ public struct KeychainAccountStorage: AccountStorage {
     }
 
     public func save(_ book: AccountBook) throws {
-        guard let data = try? JSONEncoder().encode(book) else { return }
-        try keychain.write(data)
+        // Not `try?`: an encode that fails and returns looks to the caller exactly like a
+        // save that worked, which is the silence the warning above it exists to break.
+        try keychain.write(JSONEncoder().encode(book))
     }
 }
 
@@ -56,8 +57,9 @@ public final class AccountStore {
     /// Set when the accounts could not be written. Not thrown from the mutators, whose
     /// thirteen call sites are all SwiftUI actions — but recorded rather than discarded,
     /// because an account that appears to save and does not is the same silence that made
-    /// #17 undiagnosable. Surfacing it is #19.
-    public private(set) var lastSaveError: Error?
+    /// #17 undiagnosable. A banner over whatever is on screen reads it and says so, and
+    /// stays up until a write lands — see `AccountSaveFailure.standing`.
+    public private(set) var lastSaveFailure: AccountSaveFailure?
 
     private let storage: AccountStorage
 
@@ -71,35 +73,107 @@ public final class AccountStore {
 
     @discardableResult
     public func add(_ account: Account) -> Account {
-        mutate { $0.upsert(account) }
+        mutate(.addAccount) { $0.upsert(account) }
         return book.accounts.last ?? account
     }
 
     public func setActive(_ id: String) {
-        mutate { $0.activeAccountId = id }
+        mutate(.switchAccount) { $0.activeAccountId = id }
     }
 
     public func remove(_ id: String) {
-        mutate { $0.remove(id: id) }
+        mutate(.removeAccount) { $0.remove(id: id) }
     }
 
     public func setBackupEnabled(_ id: String, _ enabled: Bool) {
-        mutate { $0.update(id: id) { $0.backupEnabled = enabled } }
+        mutate(.backupPreference) { $0.update(id: id) { $0.backupEnabled = enabled } }
     }
 
     public func setTokens(_ id: String, _ tokens: TokenSet) {
-        mutate { $0.update(id: id) { $0.tokens = tokens } }
+        mutate(.refreshedTokens) { $0.update(id: id) { $0.tokens = tokens } }
     }
 
-    private func mutate(_ change: (inout AccountBook) -> Void) {
+    /// Whether the accounts are reaching the keychain at all.
+    ///
+    /// Stays true across however many failures follow — only a write that lands makes it
+    /// untrue, and nothing else takes it down. The failure beside it names the most recent
+    /// change, and that one is allowed to move on.
+    public var cannotSaveAccounts: Bool { lastSaveFailure != nil }
+
+    /// The book advances whether or not the write lands, and deliberately.
+    ///
+    /// Rolling back looks more honest, but the mutation that matters most is the token
+    /// refresh: the new token is the only one that works, and discarding it signs the
+    /// person out immediately instead of at relaunch. That trades a visible-and-explained
+    /// divergence for an invisible one, which is #17 again. So: keep the change, and say
+    /// out loud that it is not on disk.
+    private func mutate(_ change: AccountChange, _ apply: (inout AccountBook) -> Void) {
         var updated = book
-        change(&updated)
+        apply(&updated)
         book = updated
         do {
             try storage.save(updated)
-            lastSaveError = nil
+            lastSaveFailure = nil
         } catch {
-            lastSaveError = error
+            lastSaveFailure = AccountSaveFailure(change: change, error: error)
         }
+    }
+}
+
+/// What was being written. The consequence of losing it differs enough between them to be
+/// worth telling apart: a lost sign-in and a lost backup toggle are not the same news.
+public enum AccountChange: Sendable {
+    case addAccount
+    case removeAccount
+    case switchAccount
+    case backupPreference
+    case refreshedTokens
+}
+
+/// A write the keychain refused, in terms somebody can act on.
+public struct AccountSaveFailure {
+    public let change: AccountChange
+    public let error: any Error
+
+    public init(change: AccountChange, error: any Error) {
+        self.change = change
+        self.error = error
+    }
+
+    /// The half that is true of every failed save, and stays true until one lands.
+    ///
+    /// Said alongside the consequence rather than instead of it: a second failure replaces
+    /// what is being warned about, and without this line it would also replace the warning
+    /// — trading "this account will be signed out" for "a toggle reverted" while the first
+    /// was still being read.
+    public static let standing = "imogen cannot save your accounts on this device. "
+        + "Nothing you change is being kept."
+
+    /// What the next launch will look like. Always the next launch: until then the app
+    /// holds the change in memory and behaves as though it saved, which is exactly why
+    /// the divergence needs saying now rather than being discovered later.
+    public var consequence: String {
+        switch change {
+        case .addAccount:
+            "This account is not saved, and will be gone when imogen starts again."
+        case .removeAccount:
+            "Signing out is not saved. The account will be back when imogen starts again, "
+                + "and will have to be signed out again."
+        case .switchAccount:
+            "The account you switched to is not saved, and imogen will start again on the "
+                + "previous one."
+        case .backupPreference:
+            "This backup setting is not saved, and will go back to what it was when imogen "
+                + "starts again."
+        case .refreshedTokens:
+            "A renewed sign-in is not saved, and this account will be signed out when imogen "
+                + "starts again."
+        }
+    }
+
+    /// What the keychain said. A locked device and a full one need different answers from
+    /// the person, so the status travels rather than being flattened to "could not save".
+    public var reason: String {
+        (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
     }
 }

@@ -81,6 +81,10 @@ struct ViewerView<Tile: PhotoTile>: View {
             }
         }
         .statusBarHidden(!chromeVisible)
+        // Over the photograph rather than waiting behind it: a token refresh runs while
+        // somebody is looking at one, and this is presented over the navigation stack
+        // that would otherwise have carried the warning.
+        .accountsNotSaved()
         .onAppear { current = initial.id }
         // Every photograph deleted from underneath the pager shortens the list. Closing
         // when it empties is the only sensible end to that.

@@ -1,3 +1,4 @@
+import Security
 import XCTest
 
 @testable import ImogenKit
@@ -157,5 +158,162 @@ final class AccountStorageTests: XCTestCase {
         store.setBackupEnabled("a", true)
 
         XCTAssertEqual(store.book.backingUpTo.map(\.id), ["a"])
+    }
+}
+
+/// Storage that refuses, which is what a locked or full keychain looks like from here.
+/// The real refusal cannot be forced portably, so the protocol is the seam.
+private struct RefusingStorage: AccountStorage {
+    let book: AccountBook
+
+    init(_ book: AccountBook = AccountBook()) { self.book = book }
+
+    func load() -> AccountBook { book }
+
+    func save(_ book: AccountBook) throws {
+        throw KeychainError(status: errSecInteractionNotAllowed)
+    }
+}
+
+final class AccountSaveFailureTests: XCTestCase {
+
+    @MainActor
+    func testAFailedSaveIsRecordedWithWhatWasBeingSaved() {
+        let store = AccountStore(storage: RefusingStorage())
+
+        store.add(account("a"))
+
+        XCTAssertEqual(store.lastSaveFailure?.change, .addAccount)
+    }
+
+    /// The book is not rolled back. A refreshed token that cannot be written is still the
+    /// only one that works this session; discarding it would sign the person out now
+    /// rather than at relaunch, and tell them nothing either way.
+    @MainActor
+    func testTheInMemoryBookKeepsTheChangeThatCouldNotBeWritten() {
+        let store = AccountStore(storage: RefusingStorage())
+
+        store.add(account("a"))
+
+        XCTAssertEqual(store.accounts.map(\.id), ["a"])
+    }
+
+    @MainActor
+    func testEachMutatorNamesItsOwnConsequence() {
+        let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
+
+        store.setBackupEnabled("a", true)
+        XCTAssertEqual(store.lastSaveFailure?.change, .backupPreference)
+
+        store.setActive("a")
+        XCTAssertEqual(store.lastSaveFailure?.change, .switchAccount)
+
+        store.remove("a")
+        XCTAssertEqual(store.lastSaveFailure?.change, .removeAccount)
+
+        store.add(account("a"))
+        XCTAssertEqual(store.lastSaveFailure?.change, .addAccount)
+
+        store.setTokens("a", tokens(obtainedAt: 5))
+        XCTAssertEqual(store.lastSaveFailure?.change, .refreshedTokens)
+    }
+
+    /// Every consequence is about the next launch, which is when the divergence shows.
+    @MainActor
+    func testTheConsequenceSaysWhatTheNextLaunchWillLookLike() {
+        let store = AccountStore(storage: RefusingStorage())
+        store.add(account("a"))
+
+        XCTAssertTrue(store.lastSaveFailure?.consequence.contains("starts again") == true)
+    }
+
+    /// The keychain's own status is what distinguishes a locked device from a full one,
+    /// so it travels with the failure rather than being flattened to "could not save".
+    @MainActor
+    func testTheReasonCarriesWhatTheKeychainSaid() {
+        let store = AccountStore(storage: RefusingStorage())
+        store.add(account("a"))
+
+        XCTAssertEqual(
+            store.lastSaveFailure?.reason,
+            KeychainError(status: errSecInteractionNotAllowed).errorDescription
+        )
+    }
+
+    @MainActor
+    func testASaveThatWorksClearsTheOneThatDidNot() {
+        let storage = FlakyStorage()
+        let store = AccountStore(storage: storage)
+
+        storage.refusing = true
+        store.add(account("a"))
+        XCTAssertNotNil(store.lastSaveFailure)
+
+        storage.refusing = false
+        store.setBackupEnabled("a", true)
+
+        XCTAssertNil(store.lastSaveFailure)
+    }
+
+    /// The standing warning is not retired by a newer failure — only the consequence
+    /// beside it changes. Suppressing the later one instead was the same loss in the
+    /// other direction: the person acts, nothing is written, and nothing says so.
+    @MainActor
+    func testALaterFailureMovesTheConsequenceOnAndLeavesTheWarningStanding() {
+        let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
+
+        store.setTokens("a", tokens(obtainedAt: 5))
+        store.setBackupEnabled("a", true)
+
+        XCTAssertEqual(store.lastSaveFailure?.change, .backupPreference)
+        XCTAssertTrue(store.cannotSaveAccounts)
+    }
+
+    /// Nothing but a write that lands makes the warning untrue, so nothing else takes it
+    /// down: not a different failure, and not the person having read it.
+    @MainActor
+    func testOnlyASaveThatLandsTakesTheWarningDown() {
+        let storage = FlakyStorage()
+        let store = AccountStore(storage: storage)
+
+        storage.refusing = true
+        store.add(account("a"))
+        store.setBackupEnabled("a", true)
+        XCTAssertTrue(store.cannotSaveAccounts)
+
+        storage.refusing = false
+        store.setBackupEnabled("a", false)
+
+        XCTAssertFalse(store.cannotSaveAccounts)
+        XCTAssertNil(store.lastSaveFailure)
+    }
+
+    /// The standing half says the same thing whichever change failed — that is what makes
+    /// it safe for the consequence beside it to be replaced.
+    @MainActor
+    func testTheStandingLineDoesNotDependOnWhichChangeFailed() {
+        let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
+
+        store.setTokens("a", tokens(obtainedAt: 5))
+        let afterTokens = AccountSaveFailure.standing
+
+        store.setBackupEnabled("a", true)
+
+        XCTAssertEqual(AccountSaveFailure.standing, afterTokens)
+        XCTAssertFalse(AccountSaveFailure.standing.isEmpty)
+        XCTAssertNotEqual(store.lastSaveFailure?.consequence, AccountSaveFailure.standing)
+    }
+}
+
+private final class FlakyStorage: AccountStorage, @unchecked Sendable {
+    private let lock = NSLock()
+    private var book = AccountBook()
+    var refusing = false
+
+    func load() -> AccountBook { lock.withLock { book } }
+
+    func save(_ book: AccountBook) throws {
+        if refusing { throw KeychainError(status: errSecInteractionNotAllowed) }
+        lock.withLock { self.book = book }
     }
 }
