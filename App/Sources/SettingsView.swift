@@ -182,9 +182,7 @@ struct BackupView: View {
                     }
                     .disabled(!settings.enabled)
                 }
-
-                // Here as well as in Settings: this is the screen the toggle is on, and a
-                // warning one level up is one nobody chose to go and read.            } header: {
+            } header: {
                 Text("Copy to")
             } footer: {
                 Text("Every account you choose gets its own copy.")
