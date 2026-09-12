@@ -57,7 +57,7 @@ public final class AccountStore {
     /// Set when the accounts could not be written. Not thrown from the mutators, whose
     /// thirteen call sites are all SwiftUI actions — but recorded rather than discarded,
     /// because an account that appears to save and does not is the same silence that made
-    /// #17 undiagnosable. Settings reads it and says so.
+    /// #17 undiagnosable. A banner over whatever is on screen reads it and says so.
     public private(set) var lastSaveFailure: AccountSaveFailure?
 
     private let storage: AccountStorage
