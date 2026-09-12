@@ -124,6 +124,27 @@ final class ScrubDragTests: XCTestCase {
         XCTAssertNil(drag.finish())
     }
 
+    /// `DragGesture(minimumDistance: 0)` reports a value the moment a finger lands, and a
+    /// finger resting on glass goes on producing them a fraction of a point apart. None of
+    /// those is a drag, and the grid — which is already showing this day — must not snap
+    /// its heading to the top of the screen because somebody touched the thumb.
+    func testADragThatEndsOnTheDayItStartedOnSeeksNothing() {
+        var drag = ScrubDrag(fromDay: 2, in: months)
+        drag.move(by: 0.4, over: 600, in: months)
+        XCTAssertNil(drag.finish())
+    }
+
+    /// And a drag that wanders off and comes back is the same. The grid is only moved on
+    /// release, so it is still exactly where it was.
+    func testADragThatReturnsToWhereItStartedSeeksNothing() {
+        var drag = ScrubDrag(fromDay: 0, in: months)
+        drag.move(by: 310, over: 600, in: months)
+        drag.move(by: 0, over: 600, in: months)
+
+        XCTAssertEqual(drag.day, 0)
+        XCTAssertNil(drag.finish())
+    }
+
     func testAFinishedDragSeeksTheDayUnderTheThumb() {
         var drag = ScrubDrag(fromDay: 0, in: months)
         drag.move(by: 210, over: 600, in: months)

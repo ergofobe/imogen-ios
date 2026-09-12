@@ -41,12 +41,13 @@ public struct ScrubDrag: Equatable, Sendable {
     /// Where the thumb was when the finger took hold of it. The drag is measured from
     /// there, so the thumb moves with the finger rather than snapping under it on touch.
     private let startFraction: Double
-    /// Whether the finger has moved since it took hold. A touch that only takes hold and
-    /// lets go must leave the grid exactly where it was.
-    private var hasMoved = false
+    /// The day the grid was already showing when the finger took hold. A drag that ends
+    /// on it has nothing to ask for — see `finish()`.
+    private let startDay: Int
 
     public init(fromDay day: Int, in layout: TimelineLayout) {
         self.day = day
+        self.startDay = day
         self.startFraction = layout.fraction(ofDay: day)
         self.fraction = startFraction
     }
@@ -64,7 +65,6 @@ public struct ScrubDrag: Equatable, Sendable {
         by translation: Double, over travel: Double, in layout: TimelineLayout
     ) -> Landing? {
         guard isActive else { return nil }
-        hasMoved = true
         fraction = min(max(startFraction + translation / max(travel, 1), 0), 1)
 
         let landing = layout.day(atFraction: fraction)
@@ -82,11 +82,17 @@ public struct ScrubDrag: Equatable, Sendable {
     }
 
     /// Ends the drag, and answers with the day the grid should be moved to — or nothing,
-    /// when the finger never moved and the grid is already where it belongs.
+    /// when it is already showing it.
+    ///
+    /// Compared by day rather than by distance dragged, which spares the arbitrary
+    /// threshold a distance would need: `DragGesture(minimumDistance: 0)` reports a value
+    /// as soon as a finger lands and keeps reporting them a fraction of a point apart
+    /// while it rests there, and treating those as a drag snapped the grid to the top of
+    /// a day it was already halfway through — from a touch that went nowhere.
     public mutating func finish() -> Int? {
         guard isActive else { return nil }
         isActive = false
-        return hasMoved ? day : nil
+        return day == startDay ? nil : day
     }
 
     /// Ends a drag that was taken away rather than let go of. Nothing is sought: there is
