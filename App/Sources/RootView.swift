@@ -128,7 +128,6 @@ private struct LibraryView: View {
     private func content(_ entry: Destination, _ session: Session, columns: Int) -> some View {
         // Inside the navigation stack rather than around the tab bar, so the banner sits
         // under the title bar instead of on top of the title.
-        //
         destination(entry, session, columns: columns)
             .safeAreaInset(edge: .top) { SaveFailureBanner() }
     }
@@ -399,7 +398,6 @@ private struct AlbumPickerHost: View {
         .onAppear { if store == nil { store = AlbumsStore(session: session) } }
     }
 }
-
 
 /// The accounts could not be written to the keychain.
 ///
