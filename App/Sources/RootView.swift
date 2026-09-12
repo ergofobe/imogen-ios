@@ -122,8 +122,21 @@ private struct LibraryView: View {
         }
     }
 
-    @ViewBuilder
     private func content(_ entry: Destination, _ session: Session, columns: Int) -> some View {
+        // Inside the navigation stack rather than around the tab bar, so the banner sits
+        // under the title bar instead of on top of the title.
+        destination(entry, session, columns: columns)
+            .safeAreaInset(edge: .top) {
+                if let failure = model.accounts.lastSaveFailure, failure.isUnprompted {
+                    SignInNotSavedBanner(failure: failure) {
+                        model.accounts.dismissSaveFailure()
+                    }
+                }
+            }
+    }
+
+    @ViewBuilder
+    private func destination(_ entry: Destination, _ session: Session, columns: Int) -> some View {
         switch entry {
         case .photos:
             TimelineHost(session: session, columns: columns) { pickingAlbumFor = $0 }
@@ -386,5 +399,37 @@ private struct AlbumPickerHost: View {
             }
         }
         .onAppear { if store == nil { store = AlbumsStore(session: session) } }
+    }
+}
+
+
+/// A renewed sign-in that could not be written, said wherever somebody happens to be.
+///
+/// Every other save failure waits in Settings, which is the screen it is about. This one
+/// cannot: it is set by a token refresh running behind whatever is on screen, and what it
+/// costs is being signed out at the next launch — by which time nobody has any reason to
+/// have gone looking in Settings.
+private struct SignInNotSavedBanner: View {
+    let failure: AccountSaveFailure
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.red)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(failure.consequence)
+                Text(failure.reason).foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+
+            Button("Dismiss", action: dismiss)
+        }
+        .font(.caption)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity)
+        .background(.thinMaterial)
     }
 }

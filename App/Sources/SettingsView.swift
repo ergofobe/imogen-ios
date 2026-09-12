@@ -41,7 +41,7 @@ struct SettingsView: View {
                     Label("Add an account", systemImage: "plus")
                 }
 
-                if let failure = model.accounts.lastSaveFailure {
+                if let failure = model.accounts.lastSaveFailure, !failure.isUnprompted {
                     SaveFailureRow(failure: failure) {
                         model.accounts.dismissSaveFailure()
                     }
@@ -187,6 +187,14 @@ struct BackupView: View {
                         }
                     }
                     .disabled(!settings.enabled)
+                }
+
+                // Here as well as in Settings: this is the screen the toggle is on, and a
+                // warning one level up is one nobody chose to go and read.
+                if let failure = model.accounts.lastSaveFailure, !failure.isUnprompted {
+                    SaveFailureRow(failure: failure) {
+                        model.accounts.dismissSaveFailure()
+                    }
                 }
             } header: {
                 Text("Copy to")

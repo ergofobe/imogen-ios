@@ -68,6 +68,10 @@ public struct Keychain: Sendable {
         // the update path is the one that runs on every token refresh.
         let updated = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if updated == errSecSuccess { return }
+        // Only "there is nothing here yet" means try adding. Falling through on any
+        // refusal turned a locked device — the commonest one — into the add's
+        // errSecDuplicateItem, which is the wrong status and points at the wrong fix.
+        guard updated == errSecItemNotFound else { throw KeychainError(status: updated) }
 
         var insert = query
         insert.merge(attributes) { _, new in new }

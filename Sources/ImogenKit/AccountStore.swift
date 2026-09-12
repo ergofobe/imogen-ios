@@ -146,7 +146,11 @@ public struct AccountSaveFailure {
         case .addAccount:
             "This account is not saved, and will be gone when imogen starts again."
         case .removeAccount:
-            "Signing out is not saved, and the account will be back when imogen starts again."
+            // Back, but not working: the grant is revoked on the server before the
+            // account is dropped here, so what returns is a row that has to be signed
+            // out again.
+            "Signing out is not saved. The account will be back when imogen starts again, "
+                + "already signed out, and will have to be removed again."
         case .switchAccount:
             "The account you switched to is not saved, and imogen will start again on the "
                 + "previous one."
@@ -158,6 +162,13 @@ public struct AccountSaveFailure {
                 + "starts again."
         }
     }
+
+    /// Whether anything on screen is already about this.
+    ///
+    /// A renewed token is written behind whatever the person is doing, and losing it signs
+    /// them out at the next launch — nothing would send them to Settings to find that out.
+    /// The other four follow something they just did, on the screen they did it on.
+    public var isUnprompted: Bool { change == .refreshedTokens }
 
     /// What the keychain said. A locked device and a full one need different answers from
     /// the person, so the status travels rather than being flattened to "could not save".
