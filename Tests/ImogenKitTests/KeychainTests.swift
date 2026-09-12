@@ -61,4 +61,22 @@ final class KeychainTests: XCTestCase {
         XCTAssertNotEqual(failure.errorDescription, "The operation couldn\u{2019}t be completed.")
     }
 
+
+    /// The encode was `try?`, so a book that would not serialise returned as though it
+    /// had been written — and the store then cleared its own warning. A save that cannot
+    /// save has to say so, whichever half of it failed.
+    func testABookThatCannotBeEncodedIsARefusalRatherThanASilentNoOp() {
+        let storage = KeychainAccountStorage(
+            service: "com.imogen.tests", account: "case-\(UUID().uuidString)"
+        )
+        let unserialisable = TokenSet(
+            accessToken: "at", refreshToken: nil, obtainedAt: .nan, expiresIn: 3600, scope: ""
+        )
+        let account = Account(
+            serverURL: "https://a.example.com", userId: "u", email: "u@example.com",
+            name: "u", clientId: "c", tokens: unserialisable
+        )
+
+        XCTAssertThrowsError(try storage.save(AccountBook(accounts: [account])))
+    }
 }

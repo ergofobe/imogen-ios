@@ -20,8 +20,9 @@ public struct KeychainAccountStorage: AccountStorage {
     }
 
     public func save(_ book: AccountBook) throws {
-        guard let data = try? JSONEncoder().encode(book) else { return }
-        try keychain.write(data)
+        // Not `try?`: an encode that fails and returns looks to the caller exactly like a
+        // save that worked, which is the silence the warning above it exists to break.
+        try keychain.write(JSONEncoder().encode(book))
     }
 }
 
