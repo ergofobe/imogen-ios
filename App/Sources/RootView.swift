@@ -463,6 +463,8 @@ private struct AlbumPickerHost: View {
 private struct AccountsUnreadableView: View {
     @Environment(AppModel.self) private var model
 
+    @State private var confirmingReplacement = false
+
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: "lock.trianglebadge.exclamationmark")
@@ -471,16 +473,49 @@ private struct AccountsUnreadableView: View {
                 .accessibilityHidden(true)
 
             if let failure = model.accounts.lastFailure {
-                Text(failure.standing).font(.headline)
-                Text(failure.consequence)
-                Text(failure.reason).font(.caption).foregroundStyle(.secondary)
+                VStack(spacing: 12) {
+                    Text(failure.standing).font(.headline)
+                    Text(failure.consequence)
+                    Text(failure.reason).font(.caption).foregroundStyle(.secondary)
+                }
+                // One element, for the same reason the banner is: three labels make
+                // somebody swipe through a warning three times to learn one thing. The
+                // button below stays its own, or it could not be reached.
+                .accessibilityElement(children: .combine)
+
+                // Only for the store that cannot be read at all. One that is merely
+                // unavailable is asked again when the app comes to the front, and
+                // offering to replace those accounts would be offering to destroy
+                // accounts that are about to come back on their own.
+                if failure.kind == .unreadable {
+                    Button("Start again on this device", role: .destructive) {
+                        confirmingReplacement = true
+                    }
+                    .buttonStyle(.bordered)
+                    .padding(.top, 8)
+                }
             }
         }
         .multilineTextAlignment(.center)
         .padding(24)
-        // One element, for the same reason the banner is: three labels make somebody
-        // swipe through a warning three times to learn one thing.
-        .accessibilityElement(children: .combine)
+        .confirmationDialog(
+            "Replace the accounts stored on this device?",
+            isPresented: $confirmingReplacement,
+            titleVisibility: .visible
+        ) {
+            Button("Replace them", role: .destructive) {
+                model.accounts.allowReplacingUnreadableAccounts()
+            }
+            Button("Leave them alone", role: .cancel) {}
+        } message: {
+            // Said plainly, because it cannot be undone and the screen above it has just
+            // finished saying the accounts are still there.
+            Text(
+                "The accounts imogen cannot read are kept until you sign in again, and "
+                    + "signing in replaces them. You will have to sign in to each server "
+                    + "once more, and this cannot be undone."
+            )
+        }
     }
 }
 

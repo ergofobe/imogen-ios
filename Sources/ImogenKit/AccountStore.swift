@@ -8,15 +8,16 @@ import Observation
 /// build cannot understand does not become understandable by asking again. Telling a
 /// person to try the first remedy on the second problem is worse than saying nothing.
 public enum AccountStorageError: Error, LocalizedError {
-    /// The device would not let imogen in. Unlocking it and asking again works.
-    case locked(any Error)
-    /// What is stored cannot be read by this build — a refusal that unlocking does not
-    /// fix, or bytes that will not decode. Asking again gives the same answer.
+    /// The store would not answer. A locked device is the usual reason and -34018 is the
+    /// other; both come right on their own, so asking again is worth offering.
+    case unavailable(any Error)
+    /// The store answered, and what it holds cannot be read by this build. Asking again
+    /// gives the same answer, however many times it is asked.
     case unreadable(any Error)
 
     public var underlying: any Error {
         switch self {
-        case .locked(let error), .unreadable(let error): error
+        case .unavailable(let error), .unreadable(let error): error
         }
     }
 
@@ -52,11 +53,11 @@ public struct KeychainAccountStorage: AccountStorage {
         do {
             stored = try keychain.read()
         } catch {
-            // Only the locked device is worth waiting for. A missing entitlement or an
-            // item that is not data says the same thing on the next launch and the one
-            // after, and "unlock it and come back" is then a remedy that cannot work.
-            let locked = (error as? KeychainError)?.status == errSecInteractionNotAllowed
-            throw locked ? AccountStorageError.locked(error) : .unreadable(error)
+            // Every status but one is worth asking again about: a locked device, a keybag
+            // still settling, the -34018 that clears by itself. The exception is the item
+            // that came back and was not data, which is this device's answer for good.
+            let stuck = (error as? KeychainError)?.status == errSecInvalidData
+            throw stuck ? AccountStorageError.unreadable(error) : .unavailable(error)
         }
         guard let stored else { return AccountBook() }
 
@@ -142,13 +143,27 @@ public final class AccountStore {
     /// wrong in that direction is not something the person can undo.
     private static func kind(ofReadFailure error: any Error) -> AccountStoreFailure.Kind {
         switch error {
-        // Only a storage that says the device was locked gets the remedy offered, because
-        // that is the only one we know the remedy fixes. Anything unrecognised offers
-        // none: a warning that promises nothing is worse to read and better to trust than
-        // one that sends somebody to unlock a device that was never the problem.
-        case AccountStorageError.locked(_): .locked
-        default: .unreadable
+        // Only a storage that says so gets the terminal one. Anything unrecognised is
+        // treated as worth asking again about: a store that tells somebody their accounts
+        // are beyond recovery had better be sure, and that is the one direction the
+        // person cannot argue with.
+        case AccountStorageError.unreadable(_): .unreadable
+        default: .unavailable
         }
+    }
+
+    /// Gives up on a stored book this build cannot read, so the device can hold accounts
+    /// again.
+    ///
+    /// Destructive by consequence: the store stops refusing, and the next account signed
+    /// in replaces the unreadable payload along with the refresh tokens in it. Offered
+    /// only from the screen that has just explained that, and never for a store that was
+    /// merely unavailable — that one is asked again instead. Without it, a device holding
+    /// a payload this build cannot decode could never hold an account again.
+    public func allowReplacingUnreadableAccounts() {
+        guard case .some(.unreadable) = lastFailure?.kind else { return }
+        accountsUnreadable = false
+        lastFailure = nil
     }
 
     /// Reads again, for a device that was locked when imogen started and is not now.
@@ -157,20 +172,18 @@ public final class AccountStore {
     /// launched in the background for a backup pass is one the person then brings to the
     /// front — to an empty account list they cannot fix without killing the app.
     ///
-    /// Only the locked device, and only while nothing has been changed on top of the empty
-    /// book: adopting the device's book after that would either discard what they did or
-    /// silently merge two books that were never the same one. Nothing offers to change it
-    /// while the store is sealed — `RootView` shows the failure rather than a sign-in —
-    /// so the second condition is an invariant rather than a case somebody can reach.
+    /// Only the kind that can answer differently. A sealed store is frozen — `mutate`
+    /// changes nothing while it is — so the book being read over is always the empty one
+    /// `init` put there, and there is nothing of the person's to discard.
     public func reload() {
-        guard case .some(.locked) = lastFailure?.kind, book.accounts.isEmpty else { return }
+        guard case .some(.unavailable) = lastFailure?.kind else { return }
 
         do {
             book = try storage.load()
             accountsUnreadable = false
             lastFailure = nil
         } catch {
-            // Still locked, or locked again. The seal stays exactly where it was.
+            // Still unavailable. The seal stays exactly where it was.
             lastFailure = AccountStoreFailure(
                 kind: AccountStore.kind(ofReadFailure: error), error: error
             )
@@ -217,19 +230,25 @@ public final class AccountStore {
     /// divergence for an invisible one, which is #17 again. So: keep the change, and say
     /// out loud that it is not on disk.
     private func mutate(_ change: AccountChange, _ apply: (inout AccountBook) -> Void) {
-        var updated = book
-        apply(&updated)
-        book = updated
-
         // A book built on a read that failed is not the device's book, and writing it
         // would replace every account and refresh token on the device with the one or two
         // this session happens to know about. A refresh token cannot be re-derived, so
         // this is the one failure worth refusing outright rather than reporting after.
         //
+        // Nothing changes in memory either, which is the opposite of what a failed *write*
+        // does and for the same reason. There is no working token here to be preserved —
+        // the book is empty because nothing could be read — and a pairing link arriving
+        // from outside the app would otherwise leave a phantom account on screen, hide
+        // the failure, and make the reread unsafe for the rest of the session.
+        //
         // The read failure already on `lastFailure` is left where it is: it is the cause,
         // it is still true, and naming this change instead would replace the one line
         // that says the accounts are still on the device.
         guard !accountsUnreadable else { return }
+
+        var updated = book
+        apply(&updated)
+        book = updated
 
         do {
             try storage.save(updated)
@@ -257,8 +276,8 @@ public enum AccountChange: Sendable {
 /// a second warning competing with the one already on screen for the same device.
 public struct AccountStoreFailure {
     public enum Kind: Equatable, Sendable {
-        /// The device was locked, so what is on it is unknown. Asking again can work.
-        case locked
+        /// The store would not answer, so what is on it is unknown. Asking again can work.
+        case unavailable
         /// What is stored cannot be read by this build. Asking again cannot help.
         case unreadable
         /// A change could not be written. The book already holds it; the device does not.
@@ -281,7 +300,7 @@ public struct AccountStoreFailure {
     /// was still being read.
     public var standing: String {
         switch kind {
-        case .locked:
+        case .unavailable:
             "imogen could not read your accounts on this device, and is not writing over "
                 + "them. They are not lost — but nothing you change is being kept."
         case .unreadable:
@@ -300,10 +319,10 @@ public struct AccountStoreFailure {
         switch kind {
         // Said in the same breath as "not lost", because the screen behind this banner
         // shows no accounts, and the obvious reading of that is the wrong one.
-        case .locked:
+        case .unavailable:
             "The accounts already on this device are not shown and are not being changed. "
-                + "The device was still locked when imogen started; unlocking it and coming "
-                + "back to imogen should bring them up."
+                + "A device that was still locked when imogen started is the usual reason; "
+                + "unlocking it and coming back to imogen should bring them up."
         // No remedy offered, because there is none from here. Saying "start it again"
         // would be telling somebody to do the one thing that cannot work.
         case .unreadable:

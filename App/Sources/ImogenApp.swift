@@ -17,6 +17,12 @@ struct ImogenApp: App {
                 .environment(model)
                 .tint(.imogenSafelight)
                 .task {
+                    // Here as well as on the scene phase below: a launch that goes
+                    // straight to `.active` has no transition to observe, and tapping
+                    // imogen from the lock screen while the keybag is still settling is
+                    // exactly that launch. Idempotent — it does nothing unless the store
+                    // sealed itself.
+                    model.accounts.reload()
                     AppModelHolder.current = model
                     pairFromEnvironmentIfAsked()
                 }
