@@ -24,7 +24,10 @@ public struct KeychainError: Error, LocalizedError, Equatable {
 
     public var errorDescription: String? {
         let detail = SecCopyErrorMessageString(status, nil) as String?
-        return "The keychain refused to store this (\(status))"
+        // Not "refused to store": the same error now reports a refused read, and telling
+        // somebody their accounts could not be saved when nothing was being saved points
+        // away from the cause exactly as the silence this type replaced did.
+        return "The keychain refused the request (\(status))"
             + (detail.map { ": \($0)" } ?? "")
     }
 }
@@ -46,16 +49,26 @@ public struct Keychain: Sendable {
         ]
     }
 
-    public func read() -> Data? {
+    /// What is stored, or nil when nothing is.
+    ///
+    /// Only errSecItemNotFound is nil. Every other refusal is thrown, because the two are
+    /// not the same answer and flattening them into one is what let a locked device look
+    /// like a device with no accounts on it — and the next write then replaced the
+    /// accounts that were there with the nothing that had been read.
+    public func read() throws -> Data? {
         var lookup = query
         lookup[kSecReturnData as String] = true
         lookup[kSecMatchLimit as String] = kSecMatchLimitOne
 
         var result: CFTypeRef?
-        guard SecItemCopyMatching(lookup as CFDictionary, &result) == errSecSuccess else {
-            return nil
-        }
-        return result as? Data
+        let status = SecItemCopyMatching(lookup as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw KeychainError(status: status) }
+
+        // A hit that is not data is a stored item we cannot use, which is a refusal and
+        // not an empty device.
+        guard let data = result as? Data else { throw KeychainError(status: errSecInvalidData) }
+        return data
     }
 
     public func write(_ data: Data) throws {

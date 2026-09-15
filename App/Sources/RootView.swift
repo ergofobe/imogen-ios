@@ -49,6 +49,9 @@ enum Destination: String, CaseIterable, Identifiable, Hashable {
 struct RootView: View {
     @Environment(AppModel.self) private var model
 
+    /// What the last announcement said, so the same warning is not said twice.
+    @State private var announced: String?
+
     var body: some View {
         Group {
             if let account = model.active {
@@ -57,6 +60,12 @@ struct RootView: View {
                     // tree is what guarantees no screen is left showing the last one's
                     // photographs.
                     .id(account.id)
+            } else if model.accounts.accountsUnreadable {
+                // Not AddAccountView. The store is refusing to write, so a sign-in here
+                // would last until the app closed and no longer — and it is the one
+                // action that makes the read unrepeatable, because a book with something
+                // in it can no longer be replaced by the device's own.
+                AccountsUnreadableView()
             } else {
                 // Signing out the last account is a save like any other, and this is the
                 // only screen left to say it did not land on.
@@ -66,12 +75,33 @@ struct RootView: View {
         // Announced once, here, rather than by the banner: the banner is attached in
         // several places at a time — a stack, and the viewer presented over it — and each
         // of them announcing would say it twice to somebody who cannot see either.
-        .onChange(of: model.accounts.lastSaveFailure?.consequence) { _, consequence in
-            guard let consequence else { return }
-            AccessibilityNotification.Announcement(
-                "\(AccountSaveFailure.standing) \(consequence)"
-            ).post()
+        //
+        // On appear as well as on change: a read that failed is recorded before any of
+        // this is on screen, so there is no change to notice — and that is the failure
+        // somebody most needs told, because the screen behind it looks like a device with
+        // no accounts on it.
+        .onAppear { announce(model.accounts.lastFailure) }
+        .onChange(of: model.accounts.lastFailure?.consequence) { _, _ in
+            announce(model.accounts.lastFailure)
         }
+    }
+
+    private func announce(_ failure: AccountStoreFailure?) {
+        guard let failure else {
+            // A write that landed. Whatever comes next is news again, even if it says
+            // the same words as the failure before it.
+            announced = nil
+            return
+        }
+        let warning = "\(failure.standing) \(failure.consequence)"
+
+        // `onAppear` fires again whenever the branch below changes child — adding the
+        // first account, and every switch after that, since the library is rebuilt by
+        // `.id`. Repeating a warning somebody has already heard is noise on top of the
+        // thing it is trying to make audible.
+        guard warning != announced else { return }
+        announced = warning
+        AccessibilityNotification.Announcement(warning).post()
     }
 }
 
@@ -424,6 +454,75 @@ private struct AlbumPickerHost: View {
     }
 }
 
+/// There are no accounts to show because none could be read.
+///
+/// The same three lines the banner carries, but as the whole screen. There is nothing else
+/// to put here, and along the bottom of an otherwise empty page they read as a footnote
+/// about something else — while the page itself says, wrongly, that this device has never
+/// had an account on it.
+private struct AccountsUnreadableView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "lock.trianglebadge.exclamationmark")
+                .font(.largeTitle)
+                .foregroundStyle(.red)
+                .accessibilityHidden(true)
+
+            if let failure = model.accounts.lastFailure {
+                VStack(spacing: 12) {
+                    Text(failure.standing).font(.headline)
+                    Text(failure.consequence)
+                    Text(failure.reason).font(.caption).foregroundStyle(.secondary)
+                }
+                // One element, for the same reason the banner is: three labels make
+                // somebody swipe through a warning three times to learn one thing. The
+                // button below stays its own, or it could not be reached.
+                .accessibilityElement(children: .combine)
+
+                // Always available, whichever kind: a read costs nothing, and a screen
+                // that says "unlocking it and trying again should bring them up" to
+                // somebody already unlocked and already here needs something for them to
+                // try. It is also the only way out of a seal inside one launch — the
+                // automatic reread waits for a foreground transition that a launch
+                // refused at startup never produces.
+                Button("Try again", action: tryAgain)
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 8)
+            }
+
+            // A pairing link or an OAuth redirect arrives through `onOpenURL` wherever
+            // somebody is, and this is where they are when nothing can be stored. Without
+            // this the refusal has nowhere to appear at all: there is no AddAccountView
+            // on screen to carry it.
+            if case .failed(let message) = model.link {
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .padding(.top, 8)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .padding(24)
+    }
+
+    private func tryAgain() {
+        guard !model.accounts.retryRead() else {
+            // The screen after this one renders the same link state, and a refusal from
+            // while the store was sealed is not true of a store that is reading again.
+            model.clearLinkState()
+            return
+        }
+
+        // Said here rather than through the announcement at the root, which drops a
+        // warning identical to the one it last said — and a second refusal is word for
+        // word the first. Nothing on screen changes either, so without this the button
+        // is indistinguishable from a button that does nothing.
+        AccessibilityNotification.Announcement("Still could not read your accounts.").post()
+    }
+}
+
 /// The accounts are not reaching the keychain.
 ///
 /// Two lines, because they answer different questions and go stale at different times. The
@@ -437,14 +536,14 @@ private struct SaveFailureBanner: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if let failure = model.accounts.lastSaveFailure {
+        if let failure = model.accounts.lastFailure {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
                     .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(AccountSaveFailure.standing).foregroundStyle(.red)
+                    Text(failure.standing).foregroundStyle(.red)
                     Text(failure.consequence)
                     Text(failure.reason).foregroundStyle(.secondary)
                 }

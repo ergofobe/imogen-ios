@@ -106,10 +106,22 @@ final class AppModel {
             link = .failed(LinkError.notAnInvitation.localizedDescription)
             return
         }
+        // Before the invitation is spent, not after. Pairing consumes it at the server,
+        // so a refusal discovered on the way back leaves somebody holding a QR code that
+        // will never work again — and a pairing link arrives through `onOpenURL` whatever
+        // is on screen, including the screen that is there because nothing can be stored.
+        guard !accounts.accountsUnreadable else {
+            link = .failed(cannotStoreAnAccount)
+            return
+        }
         link = .working
         Task {
             do {
-                accounts.add(try await linker.pair(invitation))
+                let account = try await linker.pair(invitation)
+                guard accounts.add(account) != nil else {
+                    link = .failed(signedInButNotStored)
+                    return
+                }
                 link = .linked
             } catch {
                 link = .failed(describe(error))
@@ -118,6 +130,10 @@ final class AppModel {
     }
 
     func beginBrowserSignIn(server: String, open: @escaping (URL) -> Void) {
+        guard !accounts.accountsUnreadable else {
+            link = .failed(cannotStoreAnAccount)
+            return
+        }
         link = .working
         Task {
             do {
@@ -133,15 +149,46 @@ final class AppModel {
     }
 
     private func completeBrowserSignIn(_ callback: String) {
+        // The authorization code is still a code at this point. Exchanging it produces a
+        // refresh token that would have nowhere to go, and the code cannot be presented
+        // twice — so a store that is refusing is a reason not to make the exchange at all.
+        guard !accounts.accountsUnreadable else {
+            link = .failed(cannotStoreAnAccount)
+            return
+        }
         link = .working
         Task {
             do {
-                accounts.add(try await linker.completeBrowserSignIn(callback: callback))
+                let account = try await linker.completeBrowserSignIn(callback: callback)
+                guard accounts.add(account) != nil else {
+                    link = .failed(signedInButNotStored)
+                    return
+                }
                 link = .linked
             } catch {
                 link = .failed(describe(error))
             }
         }
+    }
+
+    /// Said before anything is spent.
+    private var cannotStoreAnAccount: String {
+        let why = accounts.lastFailure?.standing ?? ""
+        return "imogen cannot store an account on this device at the moment, so signing in "
+            + "would not be kept. \(why)"
+    }
+
+    /// Said after a sign-in that worked and could not be recorded.
+    ///
+    /// Not "could not sign in", which is what the app used to imply by saying nothing: the
+    /// sign-in worked. What was spent doing it — an invitation, or an authorization code
+    /// already exchanged for a refresh token — is gone, and somebody told the wrong thing
+    /// will scan the same code again and find it dead.
+    private var signedInButNotStored: String {
+        let why = accounts.lastFailure?.standing ?? ""
+        return "You were signed in, but imogen could not store the account, so it has not "
+            + "been kept. The invitation or sign-in you used has already been spent and "
+            + "will not work a second time. \(why)"
     }
 
     func clearLinkState() {
