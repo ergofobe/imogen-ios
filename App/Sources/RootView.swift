@@ -60,6 +60,12 @@ struct RootView: View {
                     // tree is what guarantees no screen is left showing the last one's
                     // photographs.
                     .id(account.id)
+            } else if model.accounts.accountsUnreadable {
+                // Not AddAccountView. The store is refusing to write, so a sign-in here
+                // would last until the app closed and no longer — and it is the one
+                // action that makes the read unrepeatable, because a book with something
+                // in it can no longer be replaced by the device's own.
+                AccountsUnreadableView()
             } else {
                 // Signing out the last account is a save like any other, and this is the
                 // only screen left to say it did not land on.
@@ -81,7 +87,12 @@ struct RootView: View {
     }
 
     private func announce(_ failure: AccountStoreFailure?) {
-        guard let failure else { return }
+        guard let failure else {
+            // A write that landed. Whatever comes next is news again, even if it says
+            // the same words as the failure before it.
+            announced = nil
+            return
+        }
         let warning = "\(failure.standing) \(failure.consequence)"
 
         // `onAppear` fires again whenever the branch below changes child — adding the
@@ -440,6 +451,36 @@ private struct AlbumPickerHost: View {
             }
         }
         .onAppear { if store == nil { store = AlbumsStore(session: session) } }
+    }
+}
+
+/// There are no accounts to show because none could be read.
+///
+/// The same three lines the banner carries, but as the whole screen. There is nothing else
+/// to put here, and along the bottom of an otherwise empty page they read as a footnote
+/// about something else — while the page itself says, wrongly, that this device has never
+/// had an account on it.
+private struct AccountsUnreadableView: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "lock.trianglebadge.exclamationmark")
+                .font(.largeTitle)
+                .foregroundStyle(.red)
+                .accessibilityHidden(true)
+
+            if let failure = model.accounts.lastFailure {
+                Text(failure.standing).font(.headline)
+                Text(failure.consequence)
+                Text(failure.reason).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .padding(24)
+        // One element, for the same reason the banner is: three labels make somebody
+        // swipe through a warning three times to learn one thing.
+        .accessibilityElement(children: .combine)
     }
 }
 

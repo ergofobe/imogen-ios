@@ -24,7 +24,10 @@ public struct KeychainError: Error, LocalizedError, Equatable {
 
     public var errorDescription: String? {
         let detail = SecCopyErrorMessageString(status, nil) as String?
-        return "The keychain refused to store this (\(status))"
+        // Not "refused to store": the same error now reports a refused read, and telling
+        // somebody their accounts could not be saved when nothing was being saved points
+        // away from the cause exactly as the silence this type replaced did.
+        return "The keychain refused the request (\(status))"
             + (detail.map { ": \($0)" } ?? "")
     }
 }

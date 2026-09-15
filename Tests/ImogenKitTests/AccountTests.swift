@@ -317,7 +317,7 @@ private final class UnreadableStorage: AccountStorage, @unchecked Sendable {
     private(set) var saves = 0
 
     /// What the read fails with, or nil once the device has been unlocked.
-    var readFailure: AccountStorageError? = .unreadable(
+    var readFailure: AccountStorageError? = .locked(
         KeychainError(status: errSecInteractionNotAllowed)
     )
 
@@ -381,7 +381,7 @@ final class AccountLoadFailureTests: XCTestCase {
     func testAFailedReadIsRecordedBeforeAnythingElseHappens() {
         let store = AccountStore(storage: UnreadableStorage(stored: AccountBook()))
 
-        XCTAssertEqual(store.lastFailure?.kind, .unreadable)
+        XCTAssertEqual(store.lastFailure?.kind, .locked)
         XCTAssertTrue(store.accountsUnreadable)
         XCTAssertTrue(store.cannotSaveAccounts)
     }
@@ -395,7 +395,7 @@ final class AccountLoadFailureTests: XCTestCase {
 
         store.add(account("b"))
 
-        XCTAssertEqual(store.lastFailure?.kind, .unreadable)
+        XCTAssertEqual(store.lastFailure?.kind, .locked)
         XCTAssertTrue(store.cannotSaveAccounts)
     }
 
@@ -414,24 +414,26 @@ final class AccountLoadFailureTests: XCTestCase {
         )
     }
 
-    /// A payload this build cannot decode is a different answer from a device that would
-    /// not answer: asking again cannot help, so the banner must not send somebody off to
-    /// relaunch. Both still refuse to write.
+    /// A payload this build cannot read is a different answer from a device that was
+    /// locked: asking again cannot help, so nothing offers a remedy and nothing retries.
+    /// Both still refuse to write.
     @MainActor
-    func testAPayloadThatWillNotDecodeIsToldApartFromADeviceThatWouldNotAnswer() throws {
+    func testAStoreThatCannotBeReadAtAllIsToldApartFromALockedDevice() throws {
         let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
-        storage.readFailure = .undecodable(
+        storage.readFailure = .unreadable(
             DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "bytes"))
         )
         let store = AccountStore(storage: storage)
 
         store.add(account("b"))
+        storage.readFailure = nil
         store.reload()
 
-        XCTAssertEqual(store.lastFailure?.kind, .undecodable)
+        XCTAssertEqual(store.lastFailure?.kind, .unreadable)
+        XCTAssertTrue(store.accountsUnreadable)
         XCTAssertEqual(storage.saves, 0)
         let failure = try XCTUnwrap(store.lastFailure)
-        XCTAssertFalse(failure.consequence.contains("usual reason"))
+        XCTAssertFalse(failure.consequence.contains("unlocking"))
     }
 
     /// The device was locked when imogen started and is not now. This is the ordinary
@@ -481,7 +483,7 @@ final class AccountLoadFailureTests: XCTestCase {
         store.reload()
 
         XCTAssertTrue(store.accountsUnreadable)
-        XCTAssertEqual(store.lastFailure?.kind, .unreadable)
+        XCTAssertEqual(store.lastFailure?.kind, .locked)
     }
 
     @MainActor

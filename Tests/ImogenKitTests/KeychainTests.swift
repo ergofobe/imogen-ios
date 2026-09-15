@@ -111,10 +111,11 @@ final class KeychainTests: XCTestCase {
         try keychain.write(Data("not an account book".utf8))
 
         XCTAssertThrowsError(try storage.load()) { error in
-            // Told apart from a refusal, because only one of the two can come right by
-            // being asked again.
-            guard case .undecodable = error as? AccountStorageError else {
-                return XCTFail("expected an undecodable payload, got \(error)")
+            // Not `.locked`: bytes that will not decode say the same thing on the next
+            // launch, and the two failures are told apart so that only one of them
+            // offers somebody a remedy.
+            guard case .unreadable = error as? AccountStorageError else {
+                return XCTFail("expected an unreadable store, got \(error)")
             }
         }
     }
