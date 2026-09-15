@@ -175,7 +175,10 @@ public struct AccountLinker: Sendable {
     }
 
     private func recall() -> Pending? {
-        guard let data = pendingStore.read() else { return nil }
+        // A refused read is still "no sign-in waiting" here, as it has always been: this
+        // record is rewritten by the next sign-in attempt, so nothing is lost by missing
+        // it. The account book is the one that cannot afford the same treatment.
+        guard let data = (try? pendingStore.read()) ?? nil else { return nil }
         return try? JSONDecoder().decode(Pending.self, from: data)
     }
 

@@ -17,7 +17,7 @@ final class KeychainTests: XCTestCase {
 
         try keychain.write(Data("verifier".utf8))
 
-        XCTAssertEqual(keychain.read(), Data("verifier".utf8))
+        XCTAssertEqual(try keychain.read(), Data("verifier".utf8))
     }
 
     func testWritingTwiceReplacesRatherThanFailing() throws {
@@ -29,11 +29,13 @@ final class KeychainTests: XCTestCase {
 
         // The update path is the one that runs on every token refresh, so a second write
         // that silently kept the first would strand an account on a stale token.
-        XCTAssertEqual(keychain.read(), Data("second".utf8))
+        XCTAssertEqual(try keychain.read(), Data("second".utf8))
     }
 
-    func testReadingWhatWasNeverWrittenIsNil() {
-        XCTAssertNil(keychain().read())
+    /// Nothing stored is nil, and is the only thing that is: everything else throws, so
+    /// a device that would not answer cannot be mistaken for a device with nothing on it.
+    func testReadingWhatWasNeverWrittenIsNil() throws {
+        XCTAssertNil(try keychain().read())
     }
 
     func testDeletingRemovesIt() throws {
@@ -42,7 +44,7 @@ final class KeychainTests: XCTestCase {
         try keychain.write(Data("verifier".utf8))
         keychain.delete()
 
-        XCTAssertNil(keychain.read())
+        XCTAssertNil(try keychain.read())
     }
 
     func testTheErrorCarriesTheStatusThatExplainsIt() {
@@ -95,5 +97,27 @@ final class KeychainTests: XCTestCase {
         )
 
         XCTAssertThrowsError(try storage.save(AccountBook(accounts: [account])))
+    }
+
+    /// The other half, and the damaging one. A payload that will not decode used to come
+    /// back as an empty book, and the next save then wrote that emptiness over accounts
+    /// that were still sitting there unread.
+    func testAStoredBookThatCannotBeDecodedIsARefusalRatherThanAnEmptyDevice() throws {
+        let account = "case-\(UUID().uuidString)"
+        let keychain = Keychain(service: "com.imogen.tests", account: account)
+        defer { keychain.delete() }
+        let storage = KeychainAccountStorage(service: "com.imogen.tests", account: account)
+
+        try keychain.write(Data("not an account book".utf8))
+
+        XCTAssertThrowsError(try storage.load())
+    }
+
+    func testADeviceWithNothingStoredLoadsAnEmptyBook() throws {
+        let storage = KeychainAccountStorage(
+            service: "com.imogen.tests", account: "case-\(UUID().uuidString)"
+        )
+
+        XCTAssertEqual(try storage.load(), AccountBook())
     }
 }

@@ -66,12 +66,22 @@ struct RootView: View {
         // Announced once, here, rather than by the banner: the banner is attached in
         // several places at a time — a stack, and the viewer presented over it — and each
         // of them announcing would say it twice to somebody who cannot see either.
-        .onChange(of: model.accounts.lastSaveFailure?.consequence) { _, consequence in
-            guard let consequence else { return }
-            AccessibilityNotification.Announcement(
-                "\(AccountSaveFailure.standing) \(consequence)"
-            ).post()
+        //
+        // On appear as well as on change: a read that failed is recorded before any of
+        // this is on screen, so there is no change to notice — and that is the failure
+        // somebody most needs told, because the screen behind it looks like a device with
+        // no accounts on it.
+        .onAppear { announce(model.accounts.lastFailure) }
+        .onChange(of: model.accounts.lastFailure?.consequence) { _, _ in
+            announce(model.accounts.lastFailure)
         }
+    }
+
+    private func announce(_ failure: AccountStoreFailure?) {
+        guard let failure else { return }
+        AccessibilityNotification.Announcement(
+            "\(failure.standing) \(failure.consequence)"
+        ).post()
     }
 }
 
@@ -437,14 +447,14 @@ private struct SaveFailureBanner: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        if let failure = model.accounts.lastSaveFailure {
+        if let failure = model.accounts.lastFailure {
             HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.red)
                     .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(AccountSaveFailure.standing).foregroundStyle(.red)
+                    Text(failure.standing).foregroundStyle(.red)
                     Text(failure.consequence)
                     Text(failure.reason).foregroundStyle(.secondary)
                 }
