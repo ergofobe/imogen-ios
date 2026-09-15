@@ -141,7 +141,7 @@ final class AccountStorageTests: XCTestCase {
     func testAnAccountSurvivesBeingWrittenAndReadBack() {
         let storage = MemoryAccountStorage()
         let store = AccountStore(storage: storage)
-        store.add(account("a"))
+        _ = store.add(account("a"))
 
         let reopened = AccountStore(storage: storage)
 
@@ -152,8 +152,8 @@ final class AccountStorageTests: XCTestCase {
     @MainActor
     func testTurningBackupOnForOneAccountLeavesTheOthersAlone() {
         let store = AccountStore(storage: MemoryAccountStorage())
-        store.add(account("a"))
-        store.add(account("b"))
+        _ = store.add(account("a"))
+        _ = store.add(account("b"))
 
         store.setBackupEnabled("a", true)
 
@@ -181,7 +181,7 @@ final class AccountStoreFailureTests: XCTestCase {
     func testAFailedSaveIsRecordedWithWhatWasBeingSaved() {
         let store = AccountStore(storage: RefusingStorage())
 
-        store.add(account("a"))
+        _ = store.add(account("a"))
 
         XCTAssertEqual(store.lastFailure?.kind, .write(.addAccount))
     }
@@ -193,7 +193,7 @@ final class AccountStoreFailureTests: XCTestCase {
     func testTheInMemoryBookKeepsTheChangeThatCouldNotBeWritten() {
         let store = AccountStore(storage: RefusingStorage())
 
-        store.add(account("a"))
+        _ = store.add(account("a"))
 
         XCTAssertEqual(store.accounts.map(\.id), ["a"])
     }
@@ -211,7 +211,7 @@ final class AccountStoreFailureTests: XCTestCase {
         store.remove("a")
         XCTAssertEqual(store.lastFailure?.kind, .write(.removeAccount))
 
-        store.add(account("a"))
+        _ = store.add(account("a"))
         XCTAssertEqual(store.lastFailure?.kind, .write(.addAccount))
 
         store.setTokens("a", tokens(obtainedAt: 5))
@@ -222,7 +222,7 @@ final class AccountStoreFailureTests: XCTestCase {
     @MainActor
     func testTheConsequenceSaysWhatTheNextLaunchWillLookLike() {
         let store = AccountStore(storage: RefusingStorage())
-        store.add(account("a"))
+        _ = store.add(account("a"))
 
         XCTAssertTrue(store.lastFailure?.consequence.contains("starts again") == true)
     }
@@ -232,7 +232,7 @@ final class AccountStoreFailureTests: XCTestCase {
     @MainActor
     func testTheReasonCarriesWhatTheKeychainSaid() {
         let store = AccountStore(storage: RefusingStorage())
-        store.add(account("a"))
+        _ = store.add(account("a"))
 
         XCTAssertEqual(
             store.lastFailure?.reason,
@@ -246,7 +246,7 @@ final class AccountStoreFailureTests: XCTestCase {
         let store = AccountStore(storage: storage)
 
         storage.refusing = true
-        store.add(account("a"))
+        _ = store.add(account("a"))
         XCTAssertNotNil(store.lastFailure)
 
         storage.refusing = false
@@ -277,7 +277,7 @@ final class AccountStoreFailureTests: XCTestCase {
         let store = AccountStore(storage: storage)
 
         storage.refusing = true
-        store.add(account("a"))
+        _ = store.add(account("a"))
         store.setBackupEnabled("a", true)
         XCTAssertTrue(store.cannotSaveAccounts)
 
@@ -317,7 +317,7 @@ private final class UnreadableStorage: AccountStorage, @unchecked Sendable {
     private(set) var saves = 0
 
     /// What the read fails with, or nil once the device has been unlocked.
-    var readFailure: AccountStorageError? = .locked(
+    var readFailure: AccountStorageError? = .transient(
         KeychainError(status: errSecInteractionNotAllowed)
     )
 
@@ -340,20 +340,44 @@ private final class UnreadableStorage: AccountStorage, @unchecked Sendable {
 
 final class AccountLoadFailureTests: XCTestCase {
 
+    private var domains: [String] = []
+
+    override func tearDown() {
+        for name in domains { UserDefaults().removePersistentDomain(forName: name) }
+        domains = []
+        super.tearDown()
+    }
+
+    /// A store with a defaults domain of its own, so one test's refused reads are not the
+    /// evidence another one's replacement offer rests on.
+    @MainActor
+    private func store(_ storage: AccountStorage) -> AccountStore {
+        let name = "imogen.tests.\(UUID().uuidString)"
+        domains.append(name)
+        let defaults = UserDefaults(suiteName: name)!
+        defaults.removePersistentDomain(forName: name)
+        return AccountStore(storage: storage, defaults: defaults)
+    }
+
+    private func unreadable() -> AccountStorageError {
+        .unreadable(DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "bytes")))
+    }
+
     /// The whole of #34. A read that fails leaves the store knowing nothing about the
     /// device, and the next write — which succeeds — used to replace every account and
     /// its refresh token with the one thing this session happened to know about.
     ///
     /// Asserted on what is stored, not on what is returned: the book advancing in memory
-    /// is deliberate (#19), and only the keychain's contents say whether anything was lost.
+    /// is deliberate for a failed *write* (#19), and only the keychain's contents say
+    /// whether anything was lost.
     @MainActor
     func testAChangeAfterAFailedReadIsNotWrittenOverTheStoredAccounts() {
         let storage = UnreadableStorage(
             stored: AccountBook(accounts: [account("a")], activeAccountId: "a")
         )
-        let store = AccountStore(storage: storage)
+        let store = store(storage)
 
-        store.add(account("b"))
+        _ = store.add(account("b"))
 
         XCTAssertEqual(storage.saves, 0)
         XCTAssertEqual(storage.stored.accounts.map(\.id), ["a"])
@@ -365,9 +389,9 @@ final class AccountLoadFailureTests: XCTestCase {
     @MainActor
     func testNoMutatorWritesAfterAFailedRead() {
         let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
-        let store = AccountStore(storage: storage)
+        let store = store(storage)
 
-        store.add(account("b"))
+        _ = store.add(account("b"))
         store.setActive("b")
         store.setBackupEnabled("b", true)
         store.setTokens("b", tokens(obtainedAt: 5))
@@ -379,9 +403,9 @@ final class AccountLoadFailureTests: XCTestCase {
 
     @MainActor
     func testAFailedReadIsRecordedBeforeAnythingElseHappens() {
-        let store = AccountStore(storage: UnreadableStorage(stored: AccountBook()))
+        let store = store(UnreadableStorage(stored: AccountBook()))
 
-        XCTAssertEqual(store.lastFailure?.kind, .locked)
+        XCTAssertEqual(store.lastFailure?.kind, .transient)
         XCTAssertTrue(store.accountsUnreadable)
         XCTAssertTrue(store.cannotSaveAccounts)
     }
@@ -391,19 +415,19 @@ final class AccountLoadFailureTests: XCTestCase {
     /// accounts are still on the device for one that reads as though they were gone.
     @MainActor
     func testAChangeDoesNotReplaceTheReadFailureItCouldNotGetPast() {
-        let store = AccountStore(storage: UnreadableStorage(stored: AccountBook()))
+        let store = store(UnreadableStorage(stored: AccountBook()))
 
-        store.add(account("b"))
+        _ = store.add(account("b"))
 
-        XCTAssertEqual(store.lastFailure?.kind, .locked)
+        XCTAssertEqual(store.lastFailure?.kind, .transient)
         XCTAssertTrue(store.cannotSaveAccounts)
     }
 
     /// What the banner says has to contradict the empty screen behind it, or somebody
-    /// reads "no accounts" and signs in again rather than unlocking and relaunching.
+    /// reads "no accounts" and signs in again rather than unlocking and trying once more.
     @MainActor
     func testTheReadFailureSaysTheAccountsAreStillThere() throws {
-        let store = AccountStore(storage: UnreadableStorage(stored: AccountBook()))
+        let store = store(UnreadableStorage(stored: AccountBook()))
         let failure = try XCTUnwrap(store.lastFailure)
 
         XCTAssertTrue(failure.standing.contains("not lost"))
@@ -414,19 +438,17 @@ final class AccountLoadFailureTests: XCTestCase {
         )
     }
 
-    /// Everything that is not the locked device is reported honestly rather than retried:
-    /// no remedy is promised, the status is shown, and the deliberate replacement is what
-    /// is offered instead. Both kinds still refuse to write.
+    /// Everything that is not known to come right on its own is reported honestly rather
+    /// than retried behind somebody's back: no remedy is promised, the status is shown,
+    /// and nothing rereads it unasked. Both kinds still refuse to write.
     @MainActor
-    func testAStoreThatCannotBeReadAtAllIsToldApartFromALockedDevice() throws {
+    func testAStoreThatCannotBeReadIsNotRetriedOnSomebodysBehalf() throws {
         let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
-        storage.readFailure = .unreadable(
-            DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "bytes"))
-        )
-        let store = AccountStore(storage: storage)
+        storage.readFailure = unreadable()
+        let store = store(storage)
 
         storage.readFailure = nil
-        store.reload()
+        store.reloadIfTransient()
 
         XCTAssertEqual(store.lastFailure?.kind, .unreadable)
         XCTAssertTrue(store.accountsUnreadable)
@@ -435,38 +457,123 @@ final class AccountLoadFailureTests: XCTestCase {
         XCTAssertFalse(failure.consequence.contains("unlocking"))
     }
 
-    /// Without a way out, a device holding a payload this build cannot decode could never
-    /// hold an account again: every launch reads the same bytes and seals on them.
+    /// -34018 reads like a provisioning mistake and is usually the keybag race at launch.
+    /// Calling it permanent is what would have offered somebody the destruction of a
+    /// payload that was readable all along.
+    func testTheKeybagRaceIsTransientAndSoIsALockedDevice() {
+        XCTAssertTrue(KeychainAccountStorage.isTransient(errSecInteractionNotAllowed))
+        XCTAssertTrue(KeychainAccountStorage.isTransient(errSecMissingEntitlement))
+
+        XCTAssertFalse(KeychainAccountStorage.isTransient(errSecDecode))
+        XCTAssertFalse(KeychainAccountStorage.isTransient(errSecInvalidItemRef))
+        XCTAssertFalse(KeychainAccountStorage.isTransient(errSecInvalidData))
+    }
+
+    /// Anything the app can ask for by hand it can ask for again, whichever kind — a read
+    /// costs nothing, and a screen that says "try again" needs something to try.
     @MainActor
-    func testAStoreThatCannotBeReadCanBeDeliberatelyReplaced() {
+    func testTryingAgainReadsWhicheverKindOfFailureItWas() {
         let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
-        storage.readFailure = .unreadable(
-            DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "bytes"))
-        )
-        let store = AccountStore(storage: storage)
+        storage.readFailure = unreadable()
+        let store = store(storage)
+
+        XCTAssertFalse(store.retryRead())
+
+        storage.readFailure = nil
+
+        XCTAssertTrue(store.retryRead())
+        XCTAssertEqual(store.accounts.map(\.id), ["a"])
+        XCTAssertFalse(store.accountsUnreadable)
+        XCTAssertNil(store.lastFailure)
+    }
+
+    /// The rail. One refused read is a moment; replacing the accounts destroys refresh
+    /// tokens irreversibly on the strength of a classification that has been wrong before,
+    /// so it takes separate attempts to earn the offer.
+    @MainActor
+    func testReplacingIsNotOfferedOnASingleRefusedRead() {
+        let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
+        storage.readFailure = unreadable()
+        let store = store(storage)
+
+        XCTAssertFalse(store.mayReplaceUnreadableAccounts)
+
+        store.allowReplacingUnreadableAccounts()
+
+        XCTAssertTrue(store.accountsUnreadable)
+        XCTAssertNil(store.add(account("b")))
+        XCTAssertEqual(storage.stored.accounts.map(\.id), ["a"])
+    }
+
+    /// The button is what turns "it failed once" into "it fails". A relaunch does the same
+    /// thing, which is why the count outlives the process.
+    @MainActor
+    func testReplacingIsOfferedOnceTheDeviceHasRefusedTwice() {
+        let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
+        storage.readFailure = unreadable()
+        let store = store(storage)
+
+        XCTAssertFalse(store.retryRead())
+
+        XCTAssertTrue(store.mayReplaceUnreadableAccounts)
 
         store.allowReplacingUnreadableAccounts()
         XCTAssertNotNil(store.add(account("b")))
-
         XCTAssertFalse(store.accountsUnreadable)
-        XCTAssertNil(store.lastFailure)
         XCTAssertEqual(storage.stored.accounts.map(\.id), ["b"])
     }
 
-    /// Never offered for a device that was only locked: those accounts are coming back on
-    /// their own when it is unlocked, and replacing them destroys the refresh tokens this
+    /// A reread nobody asked for must not vouch for the device. Otherwise the app could
+    /// run the count up on its own by being brought to the front twice.
+    @MainActor
+    func testAnAutomaticRereadIsNotEvidence() {
+        let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
+        let store = store(storage)
+
+        store.reloadIfTransient()
+        store.reloadIfTransient()
+        storage.readFailure = unreadable()
+        store.reloadIfTransient()
+
+        XCTAssertFalse(store.mayReplaceUnreadableAccounts)
+    }
+
+    /// Never for a failure known to come right on its own: those accounts are coming back
+    /// when the device is unlocked, and replacing them destroys the refresh tokens this
     /// whole change exists to keep.
     @MainActor
-    func testALockedDeviceCannotBeReplaced() {
+    func testATransientFailureIsNeverOfferedTheReplacement() {
         let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
-        let store = AccountStore(storage: storage)
+        let store = store(storage)
 
+        XCTAssertFalse(store.retryRead())
+        XCTAssertFalse(store.retryRead())
+
+        XCTAssertFalse(store.mayReplaceUnreadableAccounts)
         store.allowReplacingUnreadableAccounts()
-        XCTAssertNil(store.add(account("b")))
 
         XCTAssertTrue(store.accountsUnreadable)
-        XCTAssertEqual(storage.saves, 0)
         XCTAssertEqual(storage.stored.accounts.map(\.id), ["a"])
+    }
+
+    /// A read that lands clears the evidence with it, so a device that came right once
+    /// does not arrive at the replacement offer on the strength of an old bad patch.
+    @MainActor
+    func testAReadThatLandsForgetsTheRefusalsBeforeIt() {
+        let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
+        storage.readFailure = unreadable()
+        let store = store(storage)
+
+        XCTAssertFalse(store.retryRead())
+        XCTAssertTrue(store.mayReplaceUnreadableAccounts)
+
+        storage.readFailure = nil
+        XCTAssertTrue(store.retryRead())
+
+        storage.readFailure = unreadable()
+        XCTAssertFalse(store.retryRead())
+
+        XCTAssertFalse(store.mayReplaceUnreadableAccounts)
     }
 
     /// The device was locked when imogen started and is not now. This is the ordinary
@@ -477,11 +584,11 @@ final class AccountLoadFailureTests: XCTestCase {
         let storage = UnreadableStorage(
             stored: AccountBook(accounts: [account("a")], activeAccountId: "a")
         )
-        let store = AccountStore(storage: storage)
+        let store = store(storage)
         XCTAssertTrue(store.accountsUnreadable)
 
         storage.readFailure = nil
-        store.reload()
+        store.reloadIfTransient()
 
         XCTAssertEqual(store.accounts.map(\.id), ["a"])
         XCTAssertFalse(store.accountsUnreadable)
@@ -500,15 +607,15 @@ final class AccountLoadFailureTests: XCTestCase {
         let storage = UnreadableStorage(
             stored: AccountBook(accounts: [account("a")], activeAccountId: "a")
         )
-        let store = AccountStore(storage: storage)
+        let store = store(storage)
 
-        store.add(account("b"))
+        _ = store.add(account("b"))
 
         XCTAssertTrue(store.accounts.isEmpty)
         XCTAssertNil(store.active)
 
         storage.readFailure = nil
-        store.reload()
+        store.reloadIfTransient()
 
         XCTAssertEqual(store.accounts.map(\.id), ["a"])
         XCTAssertFalse(store.accountsUnreadable)
@@ -517,21 +624,22 @@ final class AccountLoadFailureTests: XCTestCase {
     /// A read that is still refused leaves everything as it was, rather than reporting
     /// something new each time the app comes to the front.
     @MainActor
-    func testAReloadThatIsRefusedAgainChangesNothing() {
-        let store = AccountStore(storage: UnreadableStorage(stored: AccountBook()))
+    func testARereadThatIsRefusedAgainChangesNothing() {
+        let store = store(UnreadableStorage(stored: AccountBook()))
 
-        store.reload()
+        store.reloadIfTransient()
 
         XCTAssertTrue(store.accountsUnreadable)
-        XCTAssertEqual(store.lastFailure?.kind, .locked)
+        XCTAssertEqual(store.lastFailure?.kind, .transient)
     }
 
     @MainActor
-    func testAReloadOnAStoreThatReadCleanlyDoesNothing() {
+    func testARereadOnAStoreThatReadCleanlyDoesNothing() {
         let storage = MemoryAccountStorage(AccountBook(accounts: [account("a")]))
-        let store = AccountStore(storage: storage)
+        let store = store(storage)
 
-        store.reload()
+        store.reloadIfTransient()
+        XCTAssertFalse(store.retryRead())
 
         XCTAssertNil(store.lastFailure)
         XCTAssertEqual(store.accounts.map(\.id), ["a"])
@@ -543,7 +651,7 @@ final class AccountLoadFailureTests: XCTestCase {
     /// behind an account that is not on the device.
     @MainActor
     func testASealedStoreHoldsNothingAtAll() {
-        let store = AccountStore(storage: UnreadableStorage(stored: AccountBook()))
+        let store = store(UnreadableStorage(stored: AccountBook()))
 
         XCTAssertNil(store.add(account("b")))
         XCTAssertFalse(store.setBackupEnabled("b", true))
@@ -556,8 +664,8 @@ final class AccountLoadFailureTests: XCTestCase {
     /// one — and reported "signed in" over a spent invitation.
     @MainActor
     func testARefusedAddSaysSoRatherThanHandingTheAccountBack() {
-        let sealed = AccountStore(storage: UnreadableStorage(stored: AccountBook()))
-        let working = AccountStore(storage: MemoryAccountStorage())
+        let sealed = store(UnreadableStorage(stored: AccountBook()))
+        let working = store(MemoryAccountStorage())
 
         XCTAssertNil(sealed.add(account("b")))
         XCTAssertEqual(working.add(account("b"))?.id, "b")
@@ -568,7 +676,7 @@ final class AccountLoadFailureTests: XCTestCase {
     /// Only a sealed store answers no.
     @MainActor
     func testAFailedWriteStillCountsAsAChangeThatWasMade() {
-        let store = AccountStore(storage: RefusingStorage())
+        let store = store(RefusingStorage())
 
         XCTAssertNotNil(store.add(account("a")))
         XCTAssertNotNil(store.lastFailure)
@@ -579,12 +687,12 @@ final class AccountLoadFailureTests: XCTestCase {
     @MainActor
     func testADeviceWithNoAccountsStoredIsNotAFailedRead() {
         let storage = MemoryAccountStorage()
-        let store = AccountStore(storage: storage)
+        let store = store(storage)
 
         XCTAssertNil(store.lastFailure)
         XCTAssertFalse(store.accountsUnreadable)
 
-        store.add(account("a"))
+        _ = store.add(account("a"))
 
         XCTAssertEqual(storage.load().accounts.map(\.id), ["a"])
     }

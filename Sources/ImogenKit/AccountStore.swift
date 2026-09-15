@@ -8,16 +8,16 @@ import Observation
 /// build cannot understand does not become understandable by asking again. Telling a
 /// person to try the first remedy on the second problem is worse than saying nothing.
 public enum AccountStorageError: Error, LocalizedError {
-    /// The device was locked. The one failure known to come right on its own, and so the
-    /// only one worth asking again about.
-    case locked(any Error)
+    /// A failure known to come right on its own. Worth asking again about, and the only
+    /// thing that is.
+    case transient(any Error)
     /// The accounts could not be read, for any other reason at all. Says so and shows the
     /// status rather than guessing whether this particular one might clear by itself.
     case unreadable(any Error)
 
     public var underlying: any Error {
         switch self {
-        case .locked(let error), .unreadable(let error): error
+        case .transient(let error), .unreadable(let error): error
         }
     }
 
@@ -54,12 +54,9 @@ public struct KeychainAccountStorage: AccountStorage {
             stored = try keychain.read()
         } catch {
             // Retry only what is known to be transient, and be honest about the rest.
-            // errSecInteractionNotAllowed is the locked device and comes right by itself;
-            // errSecMissingEntitlement, errSecDecode, errSecInvalidItemRef and whatever
-            // else Security has to say do not, or not reliably, and assuming otherwise is
-            // how somebody ends up in a retry loop that can never succeed.
-            let locked = (error as? KeychainError)?.status == errSecInteractionNotAllowed
-            throw locked ? AccountStorageError.locked(error) : .unreadable(error)
+            let status = (error as? KeychainError)?.status
+            let transient = status.map(KeychainAccountStorage.isTransient) ?? false
+            throw transient ? AccountStorageError.transient(error) : .unreadable(error)
         }
         guard let stored else { return AccountBook() }
 
@@ -74,6 +71,20 @@ public struct KeychainAccountStorage: AccountStorage {
         // Not `try?`: an encode that fails and returns looks to the caller exactly like a
         // save that worked, which is the silence the warning above it exists to break.
         try keychain.write(JSONEncoder().encode(book))
+    }
+
+    /// The statuses known to come right on their own, and so the only ones retried.
+    ///
+    /// `errSecInteractionNotAllowed` is the locked device. `errSecMissingEntitlement` is
+    /// the keybag race at launch and after a restart: it reads like a provisioning mistake
+    /// and usually is not one, and calling it permanent is how a payload that was readable
+    /// all along ended up being offered for replacement.
+    ///
+    /// A list rather than a rule, because everything else Security has to say is either
+    /// permanent or not reliably transient, and this is the one place where being wrong
+    /// optimistically costs somebody their refresh tokens.
+    static func isTransient(_ status: OSStatus) -> Bool {
+        status == errSecInteractionNotAllowed || status == errSecMissingEntitlement
     }
 }
 
@@ -114,84 +125,127 @@ public final class AccountStore {
 
     /// Whether the accounts on the device are unknown because the read failed.
     ///
-    /// Once true it stays true for this store's lifetime. Only a successful read could
-    /// make it untrue, and re-reading mid-session would mean adopting a book the person
-    /// has since changed on top of the empty one — two wrong books instead of one. The
-    /// next launch reads again, which is the right moment for it.
+    /// While it is true the store is frozen: nothing is written, and nothing changes in
+    /// memory either. Only a read that lands makes it untrue — `reloadIfTransient` behind
+    /// the scenes, `retryRead` because somebody asked, or the next launch.
     public private(set) var accountsUnreadable = false
 
     private let storage: AccountStorage
+    private let defaults: UserDefaults
 
-    public init(storage: AccountStorage = KeychainAccountStorage()) {
+    /// How many separate attempts to read the accounts have been refused.
+    ///
+    /// Kept outside the process, because the evidence that matters is spread across
+    /// launches: one refusal is a moment, and two with a relaunch or a deliberate retry
+    /// between them is a device. Not in the keychain, for the obvious reason.
+    private var refusedReads: Int {
+        get { defaults.integer(forKey: AccountStore.refusedReadsKey) }
+        set { defaults.set(newValue, forKey: AccountStore.refusedReadsKey) }
+    }
+
+    private static let refusedReadsKey = "imogen.accounts.refusedReads"
+
+    public init(
+        storage: AccountStorage = KeychainAccountStorage(),
+        defaults: UserDefaults = .standard
+    ) {
         self.storage = storage
-        do {
-            self.book = try storage.load()
-        } catch {
-            // An empty book only so there is something to draw. It is explicitly not a
-            // claim about the device, which is why the store seals itself in the same
-            // breath — see `accountsUnreadable`.
-            self.book = AccountBook()
-            self.accountsUnreadable = true
-            self.lastFailure = AccountStoreFailure(
-                kind: AccountStore.kind(ofReadFailure: error), error: error
-            )
-        }
+        self.defaults = defaults
+        // An empty book only so there is something to draw. It is explicitly not a claim
+        // about the device, which is why a refused read seals the store in the same
+        // breath — see `accountsUnreadable`.
+        self.book = AccountBook()
+        read(countingRefusal: true)
     }
 
     /// Which sort of read failure this was.
     ///
-    /// Anything that does not say otherwise is treated as the retryable one. A store that
-    /// tells somebody their accounts are beyond recovery had better be sure, and being
-    /// wrong in that direction is not something the person can undo.
+    /// A storage that does not say gets the honest one. Only a storage that knows the
+    /// failure is transient can claim it, and this is the direction where being wrong
+    /// costs an extra launch rather than somebody's refresh tokens.
     private static func kind(ofReadFailure error: any Error) -> AccountStoreFailure.Kind {
         switch error {
-        // Only a storage that says the device was locked is retried. Anything else — a
-        // storage that has not heard of this distinction included — says what happened
-        // and shows the status, rather than promising a remedy on the strength of a
-        // guess. Being wrong optimistically is a retry loop that never ends and a person
-        // who is never told why; being wrong honestly costs one deliberate replacement.
-        case AccountStorageError.locked(_): .locked
+        case AccountStorageError.transient(_): .transient
         default: .unreadable
         }
     }
 
-    /// Gives up on a stored book this build cannot read, so the device can hold accounts
-    /// again.
+    /// Reads, and records what happened.
     ///
-    /// Destructive by consequence: the store stops refusing, and the next account signed
-    /// in replaces the unreadable payload along with the refresh tokens in it. Offered
-    /// only from the screen that has just explained that, and never for a device that was
-    /// merely locked — that one is asked again instead. Without it, a device whose accounts
-    /// cannot be read could never hold an account again.
-    public func allowReplacingUnreadableAccounts() {
-        guard case .some(.unreadable) = lastFailure?.kind else { return }
-        accountsUnreadable = false
-        lastFailure = nil
-    }
-
-    /// Reads again, for a device that was locked when imogen started and is not now.
-    ///
-    /// Without this the seal lasts for the life of the process, and a process the system
-    /// launched in the background for a backup pass is one the person then brings to the
-    /// front — to an empty account list they cannot fix without killing the app.
-    ///
-    /// Only the kind that can answer differently. A sealed store is frozen — `mutate`
-    /// changes nothing while it is — so the book being read over is always the empty one
-    /// `init` put there, and there is nothing of the person's to discard.
-    public func reload() {
-        guard case .some(.locked) = lastFailure?.kind else { return }
-
+    /// `countingRefusal` is false for a read nobody asked for. An automatic reread must
+    /// not accumulate evidence that replacing the accounts is safe — that is a claim about
+    /// the device made across separate deliberate attempts, not a number a foreground
+    /// transition can run up on its own.
+    private func read(countingRefusal: Bool) {
         do {
             book = try storage.load()
             accountsUnreadable = false
             lastFailure = nil
+            // Guarded: the ordinary launch reads cleanly, and writing a zero over a zero
+            // every time is a write to the defaults for nothing.
+            if refusedReads != 0 { refusedReads = 0 }
         } catch {
-            // Still locked, or refused for some new reason. The seal stays where it was,
-            // and a reason that is no longer the locked device stops the retrying.
+            accountsUnreadable = true
             lastFailure = AccountStoreFailure(
                 kind: AccountStore.kind(ofReadFailure: error), error: error
             )
+            if countingRefusal { refusedReads += 1 }
         }
+    }
+
+    /// Reads again because the app came to the front.
+    ///
+    /// Only the transient kind, and behind the scenes: a store that could not be read for
+    /// any other reason is not retried on somebody's behalf, and a read nobody asked for
+    /// does not count towards the evidence `mayReplaceUnreadableAccounts` wants.
+    ///
+    /// Without this the seal lasts for the life of the process, and a process the system
+    /// launched in the background for a backup pass is one the person then brings to the
+    /// front — to an empty account list they cannot fix without killing the app.
+    public func reloadIfTransient() {
+        guard case .some(.transient) = lastFailure?.kind else { return }
+        read(countingRefusal: false)
+    }
+
+    /// Reads again because somebody pressed Try again.
+    ///
+    /// Any sealed store, whichever kind: telling a person a read cannot succeed is not a
+    /// reason to stop them asking, and asking costs nothing. A refusal counts — this is
+    /// the button that turns "it failed once" into "it fails".
+    @discardableResult
+    public func retryRead() -> Bool {
+        guard accountsUnreadable else { return false }
+        read(countingRefusal: true)
+        return !accountsUnreadable
+    }
+
+    /// Whether replacing the stored accounts may be offered at all.
+    ///
+    /// Never on a single refused read. The classification that decides a store is beyond
+    /// recovery can be wrong — it was wrong about -34018, and that mistake would have
+    /// offered somebody the destruction of a payload that was readable all along. Two
+    /// separate refusals, with a relaunch or a deliberate retry between them, is cheap
+    /// evidence to ask for: being wrong then costs an extra launch instead of accounts
+    /// that cannot be got back.
+    public var mayReplaceUnreadableAccounts: Bool {
+        guard case .some(.unreadable) = lastFailure?.kind else { return false }
+        return refusedReads >= 2
+    }
+
+    /// Gives up on a stored book that cannot be read, so the device can hold accounts
+    /// again.
+    ///
+    /// Destructive by consequence: the store stops refusing, and the next account signed
+    /// in replaces the unreadable payload along with the refresh tokens in it. Offered
+    /// only from the screen that has just explained that, only once the device has refused
+    /// across separate attempts, and never for a failure known to be transient — that one
+    /// is asked again instead. Without it, a device whose accounts cannot be read could
+    /// never hold an account again.
+    public func allowReplacingUnreadableAccounts() {
+        guard mayReplaceUnreadableAccounts else { return }
+        accountsUnreadable = false
+        lastFailure = nil
+        refusedReads = 0
     }
 
     public var accounts: [Account] { book.accounts }
@@ -229,10 +283,13 @@ public final class AccountStore {
 
     /// Whether the accounts are reaching the keychain at all.
     ///
-    /// Stays true across however many failures follow — only a write that lands makes it
-    /// untrue, and nothing else takes it down. The failure beside it names the most recent
-    /// change, and that one is allowed to move on.
+    /// Stays true across however many failures follow. A write that lands takes it down,
+    /// and so does a read that lands on a sealed store — both mean the accounts are
+    /// reaching the keychain again, which is the whole of what this claims. Nothing else
+    /// takes it down. The failure beside it names the most recent change, and that one is
+    /// allowed to move on.
     public var cannotSaveAccounts: Bool { lastFailure != nil }
+
 
     /// The book advances whether or not the write lands, and deliberately.
     ///
@@ -293,8 +350,9 @@ public enum AccountChange: Sendable {
 /// a second warning competing with the one already on screen for the same device.
 public struct AccountStoreFailure {
     public enum Kind: Equatable, Sendable {
-        /// The device was locked, so what is on it is unknown. Asking again works.
-        case locked
+        /// A failure known to come right on its own, so what is on the device is unknown
+        /// for now. Asking again works, and the app asks on its own as well.
+        case transient
         /// The accounts could not be read, for any other reason. Nothing is retried, the
         /// status is shown, and replacing what is stored is offered as a deliberate act.
         case unreadable
@@ -318,7 +376,7 @@ public struct AccountStoreFailure {
     /// was still being read.
     public var standing: String {
         switch kind {
-        case .locked:
+        case .transient:
             "imogen could not read your accounts on this device, and is not writing over "
                 + "them. They are not lost — but nothing you change is being kept."
         case .unreadable:
@@ -337,16 +395,17 @@ public struct AccountStoreFailure {
         switch kind {
         // Said in the same breath as "not lost", because the screen behind this banner
         // shows no accounts, and the obvious reading of that is the wrong one.
-        case .locked:
+        case .transient:
             "The accounts already on this device are not shown and are not being changed. "
-                + "The device was locked when imogen started; unlocking it and coming back "
-                + "to imogen should bring them up."
+                + "A device still locked when imogen started is the usual reason; unlocking "
+                + "it and trying again should bring them up."
         // No remedy offered, because there is none from here. Saying "start it again"
         // would be telling somebody to do the one thing that cannot work.
         case .unreadable:
-            "The accounts already on this device are not shown, and starting imogen again "
-                + "will not bring them back. They are being left alone rather than replaced, "
-                + "so a later version can still read them."
+            "The accounts already on this device are not shown. They are being left alone "
+                + "rather than replaced, so a later version can still read them. Trying "
+                + "again costs nothing — if it keeps failing, imogen will offer to start "
+                + "over on this device."
         case .write(let change):
             Self.consequence(of: change)
         }

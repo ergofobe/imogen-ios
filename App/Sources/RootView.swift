@@ -483,16 +483,23 @@ private struct AccountsUnreadableView: View {
                 // button below stays its own, or it could not be reached.
                 .accessibilityElement(children: .combine)
 
-                // Only for the store that cannot be read at all. A locked device is
-                // asked again when the app comes to the front, and offering to replace
-                // those accounts would be offering to destroy accounts that are about to
-                // come back on their own.
-                if failure.kind == .unreadable {
+                // Always available, whichever kind: a read costs nothing, and a screen
+                // that says "unlocking it and trying again should bring them up" to
+                // somebody already unlocked and already here needs something for them to
+                // try. This is also what turns "it failed once" into evidence.
+                Button("Try again") { model.accounts.retryRead() }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 8)
+
+                // Only once the device has refused across separate attempts, and never
+                // for a failure known to come right on its own. The button destroys
+                // refresh tokens on the strength of a status classification, and that
+                // classification has been wrong before.
+                if model.accounts.mayReplaceUnreadableAccounts {
                     Button("Start again on this device", role: .destructive) {
                         confirmingReplacement = true
                     }
                     .buttonStyle(.bordered)
-                    .padding(.top, 8)
                 }
             }
 
@@ -516,6 +523,9 @@ private struct AccountsUnreadableView: View {
         ) {
             Button("Replace them", role: .destructive) {
                 model.accounts.allowReplacingUnreadableAccounts()
+                // The screen after this one shows the same link state, and a refusal
+                // from before the store started accepting writes is no longer true.
+                model.clearLinkState()
             }
             Button("Leave them alone", role: .cancel) {}
         } message: {

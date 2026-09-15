@@ -17,12 +17,6 @@ struct ImogenApp: App {
                 .environment(model)
                 .tint(.imogenSafelight)
                 .task {
-                    // Here as well as on the scene phase below: a launch that goes
-                    // straight to `.active` has no transition to observe, and tapping
-                    // imogen from the lock screen while the keybag is still settling is
-                    // exactly that launch. Idempotent — it does nothing unless the store
-                    // sealed itself.
-                    model.accounts.reload()
                     AppModelHolder.current = model
                     pairFromEnvironmentIfAsked()
                 }
@@ -35,9 +29,14 @@ struct ImogenApp: App {
             switch phase {
             case .active:
                 // Coming to the front means the device is unlocked, which is the one thing
-                // a read refused at launch was waiting for. Does nothing unless the store
-                // sealed itself and nobody has changed anything since — see `reload`.
-                model.accounts.reload()
+                // a read refused at launch was waiting for. Does nothing unless that read
+                // failed in a way known to come right — anything else waits for somebody
+                // to ask, so that a transition cannot vouch for the device on its own.
+                //
+                // A launch that goes straight to `.active` has no transition to observe
+                // and reads the same keybag `init` did, which is why the screen carries a
+                // Try again rather than relying on this.
+                model.accounts.reloadIfTransient()
 
                 // Coming to the front is the signal that matters. Somebody who has just
                 // taken a photograph is usually holding the phone, and waiting for the
