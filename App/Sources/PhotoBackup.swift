@@ -269,9 +269,15 @@ final class PhotoBackup {
             await recordFailure(localId, account.id, error.message, file.lastPathComponent)
             return .rejected
         } catch {
-            await recordFailure(
-                localId, account.id, error.localizedDescription, file.lastPathComponent
-            )
+            // Everything that is not an `ImogenError` arrives here raw: an upload is
+            // multipart, so the SDK will not replay it and rethrows whatever it caught.
+            // A cancelled pass and a dropped connection both look exactly like a rejection
+            // from this side and are neither, so they must not spend the file's attempts.
+            if uploadAttemptWasSpent(on: error) {
+                await recordFailure(
+                    localId, account.id, error.localizedDescription, file.lastPathComponent
+                )
+            }
             return .unavailable
         }
     }

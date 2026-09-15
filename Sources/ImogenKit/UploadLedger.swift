@@ -107,6 +107,48 @@ public func summarise(_ records: [UploadRecord]) -> FailureSummary {
 /// How many times a file is retried before it is left alone.
 public let maxUploadAttempts = 3
 
+/// Whether a failed upload was this file's own fault, and so costs it one of its attempts.
+///
+/// Running out of attempts is permanent — `settled(for:)` folds the row away and no later
+/// pass looks at it again — so only a file the server will keep refusing should be charged
+/// for one. Two things arrive looking like a rejection and are not:
+///
+/// A cancelled task. The background pass is cancelled when its `BGProcessingTask` expires,
+/// which is routine overnight behaviour on a large file and a slow connection; charging it
+/// would abandon that file after three ordinary nights.
+///
+/// A connection that dropped. An upload is multipart, so the SDK will not replay it and
+/// rethrows the raw `URLError` — the same "the server's problem, not this file's" that the
+/// `ImogenError` branch already refuses to charge to the file.
+///
+/// Anything else keeps its attempt, including a `URLError` not listed below. The counter
+/// exists so a permanently broken file is not read, hashed and posted on every pass, and
+/// an error nobody has reasoned about is not evidence that it will ever succeed.
+public func uploadAttemptWasSpent(on error: Error) -> Bool {
+    if error is CancellationError { return false }
+    guard let url = error as? URLError else { return true }
+    return !transientURLErrorCodes.contains(url.code)
+}
+
+/// Conditions that say something about the network, and nothing about the file.
+///
+/// `.cancelled` is here because URLSession answers a cancelled task with it rather than
+/// with a `CancellationError`, so it is the code the expiring background task actually
+/// produces.
+private let transientURLErrorCodes: Set<URLError.Code> = [
+    .cancelled,
+    .timedOut,
+    .networkConnectionLost,
+    .notConnectedToInternet,
+    .cannotConnectToHost,
+    .cannotFindHost,
+    .dnsLookupFailed,
+    .secureConnectionFailed,
+    .internationalRoamingOff,
+    .dataNotAllowed,
+    .callIsActive,
+]
+
 /// The ledger, on disk as one JSON file per account.
 ///
 /// Not Core Data. This is a set of identifiers with a counter attached, it is read once at
