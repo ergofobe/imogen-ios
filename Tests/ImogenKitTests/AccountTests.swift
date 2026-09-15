@@ -317,7 +317,7 @@ private final class UnreadableStorage: AccountStorage, @unchecked Sendable {
     private(set) var saves = 0
 
     /// What the read fails with, or nil once the device has been unlocked.
-    var readFailure: AccountStorageError? = .unavailable(
+    var readFailure: AccountStorageError? = .locked(
         KeychainError(status: errSecInteractionNotAllowed)
     )
 
@@ -381,7 +381,7 @@ final class AccountLoadFailureTests: XCTestCase {
     func testAFailedReadIsRecordedBeforeAnythingElseHappens() {
         let store = AccountStore(storage: UnreadableStorage(stored: AccountBook()))
 
-        XCTAssertEqual(store.lastFailure?.kind, .unavailable)
+        XCTAssertEqual(store.lastFailure?.kind, .locked)
         XCTAssertTrue(store.accountsUnreadable)
         XCTAssertTrue(store.cannotSaveAccounts)
     }
@@ -395,7 +395,7 @@ final class AccountLoadFailureTests: XCTestCase {
 
         store.add(account("b"))
 
-        XCTAssertEqual(store.lastFailure?.kind, .unavailable)
+        XCTAssertEqual(store.lastFailure?.kind, .locked)
         XCTAssertTrue(store.cannotSaveAccounts)
     }
 
@@ -414,11 +414,11 @@ final class AccountLoadFailureTests: XCTestCase {
         )
     }
 
-    /// A payload this build cannot read is a different answer from a store that would not
-    /// answer: asking again cannot help, so nothing offers a remedy and nothing retries.
-    /// Both still refuse to write.
+    /// Everything that is not the locked device is reported honestly rather than retried:
+    /// no remedy is promised, the status is shown, and the deliberate replacement is what
+    /// is offered instead. Both kinds still refuse to write.
     @MainActor
-    func testAStoreThatCannotBeReadAtAllIsToldApartFromOneThatIsMerelyUnavailable() throws {
+    func testAStoreThatCannotBeReadAtAllIsToldApartFromALockedDevice() throws {
         let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
         storage.readFailure = .unreadable(
             DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "bytes"))
@@ -446,23 +446,23 @@ final class AccountLoadFailureTests: XCTestCase {
         let store = AccountStore(storage: storage)
 
         store.allowReplacingUnreadableAccounts()
-        store.add(account("b"))
+        XCTAssertNotNil(store.add(account("b")))
 
         XCTAssertFalse(store.accountsUnreadable)
         XCTAssertNil(store.lastFailure)
         XCTAssertEqual(storage.stored.accounts.map(\.id), ["b"])
     }
 
-    /// Never offered for the store that is only unavailable: those accounts are coming
-    /// back on their own when the device is unlocked, and replacing them destroys the
-    /// refresh tokens this whole change exists to keep.
+    /// Never offered for a device that was only locked: those accounts are coming back on
+    /// their own when it is unlocked, and replacing them destroys the refresh tokens this
+    /// whole change exists to keep.
     @MainActor
-    func testAStoreThatIsOnlyUnavailableCannotBeReplaced() {
+    func testALockedDeviceCannotBeReplaced() {
         let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
         let store = AccountStore(storage: storage)
 
         store.allowReplacingUnreadableAccounts()
-        store.add(account("b"))
+        XCTAssertNil(store.add(account("b")))
 
         XCTAssertTrue(store.accountsUnreadable)
         XCTAssertEqual(storage.saves, 0)
@@ -523,7 +523,7 @@ final class AccountLoadFailureTests: XCTestCase {
         store.reload()
 
         XCTAssertTrue(store.accountsUnreadable)
-        XCTAssertEqual(store.lastFailure?.kind, .unavailable)
+        XCTAssertEqual(store.lastFailure?.kind, .locked)
     }
 
     @MainActor
@@ -545,10 +545,33 @@ final class AccountLoadFailureTests: XCTestCase {
     func testASealedStoreHoldsNothingAtAll() {
         let store = AccountStore(storage: UnreadableStorage(stored: AccountBook()))
 
-        store.add(account("b"))
-        store.setBackupEnabled("b", true)
+        XCTAssertNil(store.add(account("b")))
+        XCTAssertFalse(store.setBackupEnabled("b", true))
 
         XCTAssertTrue(store.accounts.isEmpty)
+    }
+
+    /// What made the pairing bug invisible: `add` handed back the account a sealed store
+    /// had just thrown away, so a caller could not tell a stored account from a discarded
+    /// one — and reported "signed in" over a spent invitation.
+    @MainActor
+    func testARefusedAddSaysSoRatherThanHandingTheAccountBack() {
+        let sealed = AccountStore(storage: UnreadableStorage(stored: AccountBook()))
+        let working = AccountStore(storage: MemoryAccountStorage())
+
+        XCTAssertNil(sealed.add(account("b")))
+        XCTAssertEqual(working.add(account("b"))?.id, "b")
+    }
+
+    /// A write the keychain refused is not a refusal to make the change: the book keeps
+    /// it, the banner says it is not on disk, and the caller is told the change happened.
+    /// Only a sealed store answers no.
+    @MainActor
+    func testAFailedWriteStillCountsAsAChangeThatWasMade() {
+        let store = AccountStore(storage: RefusingStorage())
+
+        XCTAssertNotNil(store.add(account("a")))
+        XCTAssertNotNil(store.lastFailure)
     }
 
     /// A device with nothing stored is the case that must still be allowed to write, and

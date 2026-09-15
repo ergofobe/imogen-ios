@@ -483,10 +483,10 @@ private struct AccountsUnreadableView: View {
                 // button below stays its own, or it could not be reached.
                 .accessibilityElement(children: .combine)
 
-                // Only for the store that cannot be read at all. One that is merely
-                // unavailable is asked again when the app comes to the front, and
-                // offering to replace those accounts would be offering to destroy
-                // accounts that are about to come back on their own.
+                // Only for the store that cannot be read at all. A locked device is
+                // asked again when the app comes to the front, and offering to replace
+                // those accounts would be offering to destroy accounts that are about to
+                // come back on their own.
                 if failure.kind == .unreadable {
                     Button("Start again on this device", role: .destructive) {
                         confirmingReplacement = true
@@ -494,6 +494,17 @@ private struct AccountsUnreadableView: View {
                     .buttonStyle(.bordered)
                     .padding(.top, 8)
                 }
+            }
+
+            // A pairing link or an OAuth redirect arrives through `onOpenURL` wherever
+            // somebody is, and this is where they are when nothing can be stored. Without
+            // this the refusal has nowhere to appear at all: there is no AddAccountView
+            // on screen to carry it.
+            if case .failed(let message) = model.link {
+                Text(message)
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .padding(.top, 8)
             }
         }
         .multilineTextAlignment(.center)
