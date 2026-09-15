@@ -8,7 +8,7 @@ import SwiftUI
 /// rather than anything about the file, this is the only route back into the backup.
 struct FailedUploadsView: View {
     @Environment(AppModel.self) private var model
-    @State private var failures: [(account: Account, record: UploadRecord)] = []
+    @State private var failures: [UploadFailure] = []
 
     var body: some View {
         List {
@@ -47,7 +47,9 @@ struct FailedUploadsView: View {
                     }
                 }
 
-                ForEach(failures, id: \.record.localId) { failure in
+                // Identified by account *and* photograph: one that failed on two
+                // servers is two rows, each with its own destination and its own retry.
+                ForEach(failures) { failure in
                     Section {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(failure.record.name).lineLimit(1)
@@ -79,7 +81,7 @@ struct FailedUploadsView: View {
         .task { await reload() }
     }
 
-    private func caption(for failure: (account: Account, record: UploadRecord)) -> String {
+    private func caption(for failure: UploadFailure) -> String {
         let state =
             failure.record.failureState == .givenUp
             ? "given up after \(failure.record.attempts) tries"
