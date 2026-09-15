@@ -316,12 +316,18 @@ private final class UnreadableStorage: AccountStorage, @unchecked Sendable {
     /// same thing back" are not the same guarantee.
     private(set) var saves = 0
 
+    /// What the read fails with, or nil once the device has been unlocked.
+    var readFailure: AccountStorageError? = .unreadable(
+        KeychainError(status: errSecInteractionNotAllowed)
+    )
+
     init(stored: AccountBook) { self.written = stored }
 
     var stored: AccountBook { lock.withLock { written } }
 
     func load() throws -> AccountBook {
-        throw KeychainError(status: errSecInteractionNotAllowed)
+        if let readFailure { throw readFailure }
+        return lock.withLock { written }
     }
 
     func save(_ book: AccountBook) throws {
@@ -375,7 +381,7 @@ final class AccountLoadFailureTests: XCTestCase {
     func testAFailedReadIsRecordedBeforeAnythingElseHappens() {
         let store = AccountStore(storage: UnreadableStorage(stored: AccountBook()))
 
-        XCTAssertEqual(store.lastFailure?.kind, .read)
+        XCTAssertEqual(store.lastFailure?.kind, .unreadable)
         XCTAssertTrue(store.accountsUnreadable)
         XCTAssertTrue(store.cannotSaveAccounts)
     }
@@ -389,7 +395,7 @@ final class AccountLoadFailureTests: XCTestCase {
 
         store.add(account("b"))
 
-        XCTAssertEqual(store.lastFailure?.kind, .read)
+        XCTAssertEqual(store.lastFailure?.kind, .unreadable)
         XCTAssertTrue(store.cannotSaveAccounts)
     }
 
@@ -406,6 +412,87 @@ final class AccountLoadFailureTests: XCTestCase {
             failure.reason,
             KeychainError(status: errSecInteractionNotAllowed).errorDescription
         )
+    }
+
+    /// A payload this build cannot decode is a different answer from a device that would
+    /// not answer: asking again cannot help, so the banner must not send somebody off to
+    /// relaunch. Both still refuse to write.
+    @MainActor
+    func testAPayloadThatWillNotDecodeIsToldApartFromADeviceThatWouldNotAnswer() throws {
+        let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
+        storage.readFailure = .undecodable(
+            DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "bytes"))
+        )
+        let store = AccountStore(storage: storage)
+
+        store.add(account("b"))
+        store.reload()
+
+        XCTAssertEqual(store.lastFailure?.kind, .undecodable)
+        XCTAssertEqual(storage.saves, 0)
+        let failure = try XCTUnwrap(store.lastFailure)
+        XCTAssertFalse(failure.consequence.contains("usual reason"))
+    }
+
+    /// The device was locked when imogen started and is not now. This is the ordinary
+    /// case, and without it the seal lasts until somebody kills the app — including for a
+    /// process the system launched in the background and the person then opened.
+    @MainActor
+    func testComingBackToAnUnlockedDeviceReadsTheAccountsAndLiftsTheSeal() {
+        let storage = UnreadableStorage(
+            stored: AccountBook(accounts: [account("a")], activeAccountId: "a")
+        )
+        let store = AccountStore(storage: storage)
+        XCTAssertTrue(store.accountsUnreadable)
+
+        storage.readFailure = nil
+        store.reload()
+
+        XCTAssertEqual(store.accounts.map(\.id), ["a"])
+        XCTAssertFalse(store.accountsUnreadable)
+        XCTAssertNil(store.lastFailure)
+
+        store.setBackupEnabled("a", true)
+        XCTAssertEqual(storage.saves, 1)
+    }
+
+    /// Once somebody has added an account on top of the empty book, adopting the device's
+    /// book would either throw their work away or merge two books that were never one.
+    @MainActor
+    func testAReloadDoesNotOverwriteWhatSomebodyHasAlreadyChanged() {
+        let storage = UnreadableStorage(stored: AccountBook(accounts: [account("a")]))
+        let store = AccountStore(storage: storage)
+
+        store.add(account("b"))
+        storage.readFailure = nil
+        store.reload()
+
+        XCTAssertEqual(store.accounts.map(\.id), ["b"])
+        XCTAssertTrue(store.accountsUnreadable)
+        XCTAssertEqual(storage.saves, 0)
+    }
+
+    /// A read that is still refused leaves everything as it was, rather than reporting
+    /// something new each time the app comes to the front.
+    @MainActor
+    func testAReloadThatIsRefusedAgainChangesNothing() {
+        let store = AccountStore(storage: UnreadableStorage(stored: AccountBook()))
+
+        store.reload()
+
+        XCTAssertTrue(store.accountsUnreadable)
+        XCTAssertEqual(store.lastFailure?.kind, .unreadable)
+    }
+
+    @MainActor
+    func testAReloadOnAStoreThatReadCleanlyDoesNothing() {
+        let storage = MemoryAccountStorage(AccountBook(accounts: [account("a")]))
+        let store = AccountStore(storage: storage)
+
+        store.reload()
+
+        XCTAssertNil(store.lastFailure)
+        XCTAssertEqual(store.accounts.map(\.id), ["a"])
     }
 
     /// The change still happens in memory, as it does for a failed write, so the session

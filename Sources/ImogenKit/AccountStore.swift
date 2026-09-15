@@ -1,6 +1,29 @@
 import Foundation
 import Observation
 
+/// Why a stored account book could not be produced.
+///
+/// The difference decides what happens next, which is why it is a type rather than a
+/// comment: a device that would not answer can answer a minute later, and a payload this
+/// build cannot understand does not become understandable by asking again. Telling a
+/// person to try the first remedy on the second problem is worse than saying nothing.
+public enum AccountStorageError: Error, LocalizedError {
+    /// The store would not answer. A locked device is the usual reason.
+    case unreadable(any Error)
+    /// The store answered with something this build cannot decode.
+    case undecodable(any Error)
+
+    public var underlying: any Error {
+        switch self {
+        case .unreadable(let error), .undecodable(let error): error
+        }
+    }
+
+    public var errorDescription: String? {
+        (underlying as? LocalizedError)?.errorDescription ?? underlying.localizedDescription
+    }
+}
+
 /// Somewhere to keep the account book. A protocol so tests do not touch the keychain.
 ///
 /// `load` throws rather than answering with an empty book, because "there is nothing
@@ -24,8 +47,19 @@ public struct KeychainAccountStorage: AccountStorage {
     /// something else is unreadable, not absent, and the accounts in it are still there
     /// to be read by whatever can read them.
     public func load() throws -> AccountBook {
-        guard let data = try keychain.read() else { return AccountBook() }
-        return try JSONDecoder().decode(AccountBook.self, from: data)
+        let stored: Data?
+        do {
+            stored = try keychain.read()
+        } catch {
+            throw AccountStorageError.unreadable(error)
+        }
+        guard let stored else { return AccountBook() }
+
+        do {
+            return try JSONDecoder().decode(AccountBook.self, from: stored)
+        } catch {
+            throw AccountStorageError.undecodable(error)
+        }
     }
 
     public func save(_ book: AccountBook) throws {
@@ -90,7 +124,45 @@ public final class AccountStore {
             // breath — see `accountsUnreadable`.
             self.book = AccountBook()
             self.accountsUnreadable = true
-            self.lastFailure = AccountStoreFailure(kind: .read, error: error)
+            self.lastFailure = AccountStoreFailure(
+                kind: AccountStore.kind(ofReadFailure: error), error: error
+            )
+        }
+    }
+
+    /// Which sort of read failure this was.
+    ///
+    /// Anything that does not say otherwise is treated as the retryable one. A store that
+    /// tells somebody their accounts are beyond recovery had better be sure, and being
+    /// wrong in that direction is not something the person can undo.
+    private static func kind(ofReadFailure error: any Error) -> AccountStoreFailure.Kind {
+        switch error {
+        case AccountStorageError.undecodable(_): .undecodable
+        default: .unreadable
+        }
+    }
+
+    /// Reads again, for a device that was locked when imogen started and is not now.
+    ///
+    /// Without this the seal lasts for the life of the process, and a process the system
+    /// launched in the background for a backup pass is one the person then brings to the
+    /// front — to an empty account list they cannot fix without killing the app.
+    ///
+    /// Only the retryable failure, and only while nothing has been changed on top of the
+    /// empty book: adopting the device's book after that would either discard what they
+    /// did or silently merge two books that were never the same one.
+    public func reload() {
+        guard case .some(.unreadable) = lastFailure?.kind, book.accounts.isEmpty else { return }
+
+        do {
+            book = try storage.load()
+            accountsUnreadable = false
+            lastFailure = nil
+        } catch {
+            // Still locked, or locked again. The seal stays exactly where it was.
+            lastFailure = AccountStoreFailure(
+                kind: AccountStore.kind(ofReadFailure: error), error: error
+            )
         }
     }
 
@@ -174,8 +246,10 @@ public enum AccountChange: Sendable {
 /// a second warning competing with the one already on screen for the same device.
 public struct AccountStoreFailure {
     public enum Kind: Equatable, Sendable {
-        /// The stored accounts could not be read, so what is on the device is unknown.
-        case read
+        /// The device would not answer, so what is on it is unknown. Asking again can work.
+        case unreadable
+        /// The device answered with something this build cannot decode. Asking again cannot.
+        case undecodable
         /// A change could not be written. The book already holds it; the device does not.
         case write(AccountChange)
     }
@@ -196,9 +270,12 @@ public struct AccountStoreFailure {
     /// was still being read.
     public var standing: String {
         switch kind {
-        case .read:
+        case .unreadable:
             "imogen could not read your accounts on this device, and is not writing over "
                 + "them. They are not lost — but nothing you change is being kept."
+        case .undecodable:
+            "imogen could not make sense of the accounts stored on this device, and is not "
+                + "writing over them. Nothing you change is being kept."
         case .write:
             "imogen cannot save your accounts on this device. "
                 + "Nothing you change is being kept."
@@ -212,10 +289,16 @@ public struct AccountStoreFailure {
         switch kind {
         // Said in the same breath as "not lost", because the screen behind this banner
         // shows no accounts, and the obvious reading of that is the wrong one.
-        case .read:
+        case .unreadable:
             "The accounts already on this device are not shown and are not being changed. "
                 + "A device that was still locked when imogen started is the usual reason; "
-                + "they should be there the next time imogen starts."
+                + "unlocking it and coming back to imogen should bring them up."
+        // No remedy offered, because there is none from here. Saying "start it again"
+        // would be telling somebody to do the one thing that cannot work.
+        case .undecodable:
+            "The accounts already on this device are not shown, and starting imogen again "
+                + "will not bring them back. They are being left alone rather than replaced, "
+                + "so a later version can still read them."
         case .write(let change):
             Self.consequence(of: change)
         }

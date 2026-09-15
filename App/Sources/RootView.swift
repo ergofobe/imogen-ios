@@ -49,6 +49,9 @@ enum Destination: String, CaseIterable, Identifiable, Hashable {
 struct RootView: View {
     @Environment(AppModel.self) private var model
 
+    /// What the last announcement said, so the same warning is not said twice.
+    @State private var announced: String?
+
     var body: some View {
         Group {
             if let account = model.active {
@@ -79,9 +82,15 @@ struct RootView: View {
 
     private func announce(_ failure: AccountStoreFailure?) {
         guard let failure else { return }
-        AccessibilityNotification.Announcement(
-            "\(failure.standing) \(failure.consequence)"
-        ).post()
+        let warning = "\(failure.standing) \(failure.consequence)"
+
+        // `onAppear` fires again whenever the branch below changes child — adding the
+        // first account, and every switch after that, since the library is rebuilt by
+        // `.id`. Repeating a warning somebody has already heard is noise on top of the
+        // thing it is trying to make audible.
+        guard warning != announced else { return }
+        announced = warning
+        AccessibilityNotification.Announcement(warning).post()
     }
 }
 

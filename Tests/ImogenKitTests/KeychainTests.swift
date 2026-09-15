@@ -110,7 +110,13 @@ final class KeychainTests: XCTestCase {
 
         try keychain.write(Data("not an account book".utf8))
 
-        XCTAssertThrowsError(try storage.load())
+        XCTAssertThrowsError(try storage.load()) { error in
+            // Told apart from a refusal, because only one of the two can come right by
+            // being asked again.
+            guard case .undecodable = error as? AccountStorageError else {
+                return XCTFail("expected an undecodable payload, got \(error)")
+            }
+        }
     }
 
     func testADeviceWithNothingStoredLoadsAnEmptyBook() throws {

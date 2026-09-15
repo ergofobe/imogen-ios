@@ -28,6 +28,11 @@ struct ImogenApp: App {
         .onChange(of: scenePhase) { _, phase in
             switch phase {
             case .active:
+                // Coming to the front means the device is unlocked, which is the one thing
+                // a read refused at launch was waiting for. Does nothing unless the store
+                // sealed itself and nobody has changed anything since — see `reload`.
+                model.accounts.reload()
+
                 // Coming to the front is the signal that matters. Somebody who has just
                 // taken a photograph is usually holding the phone, and waiting for the
                 // system to grant background time would let them put it down again.
