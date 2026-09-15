@@ -117,9 +117,11 @@ public let maxUploadAttempts = 3
 /// which is routine overnight behaviour on a large file and a slow connection; charging it
 /// would abandon that file after three ordinary nights.
 ///
-/// A connection that dropped. An upload is multipart, so the SDK will not replay it and
-/// rethrows the raw `URLError` — the same "the server's problem, not this file's" that the
-/// `ImogenError` branch already refuses to charge to the file.
+/// A connection that dropped. Whatever the SDK could retry it has already retried — a small
+/// file's single multipart request is not replayed at all, a large file's resumable chunks
+/// are, with backoff — and the raw `URLError` is what is left when that runs out. It is the
+/// same "the server's problem, not this file's" that the `ImogenError` branch already
+/// refuses to charge to the file.
 ///
 /// Anything else keeps its attempt, including a `URLError` not listed below. The counter
 /// exists so a permanently broken file is not read, hashed and posted on every pass, and

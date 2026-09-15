@@ -178,6 +178,12 @@ final class PhotoBackup {
         }
 
         var completed = 0
+        // Transient failures in a row, and whether any happened at all. A file that always
+        // fails this way spends no attempts and so is never `settled`: without the first
+        // of these the pass returns at the same photograph every time and the whole
+        // library behind it is never backed up, with no ledger row to show for it.
+        var unavailableRun = 0
+        var skippedSomething = false
         progress = BackupProgress(completed: 0, total: total, filename: nil)
         defer { progress = nil }
 
@@ -202,20 +208,31 @@ final class PhotoBackup {
                 )
 
                 let outcome = await upload(file, item, to: model.session(for: account), account)
+                guard outcome != .unavailable else {
+                    // A server having a bad day and one file that always fails this way
+                    // look identical from here, so leave this photograph for the next pass
+                    // and try the one after it. Only a run of them means the server.
+                    skippedSomething = true
+                    unavailableRun += 1
+                    guard unavailableRun < unavailableRunLimit else {
+                        // Stop pushing at it; the next pass picks up where this left off.
+                        lastError = "Couldn't reach the server. Backup will carry on later."
+                        return
+                    }
+                    break
+                }
                 // Only what is dealt with. Counting a transient failure here is what let a
                 // pass in which nothing arrived report the same progress as one that worked.
-                if outcome != .unavailable { completed += 1 }
-                if outcome == .unavailable {
-                    // The server or the network is having a bad day. Stop pushing at it;
-                    // the next pass will pick up where this one left off.
-                    lastError = "Couldn't reach the server. Backup will carry on later."
-                    try? FileManager.default.removeItem(at: file)
-                    return
-                }
+                completed += 1
+                unavailableRun = 0
             }
             if let file { try? FileManager.default.removeItem(at: file) }
         }
 
+        // Only when the pass really did reach everything. "Up to date at 04:12" over a
+        // library with photographs still outstanding is the one claim this screen must
+        // never make.
+        guard !skippedSomething else { return }
         await recordCompleted(destinations)
     }
 
@@ -240,6 +257,10 @@ final class PhotoBackup {
     }
 
     private enum Outcome { case uploaded, rejected, unavailable }
+
+    /// How many photographs in a row may fail transiently before the pass concludes it is
+    /// the server rather than the files, and stops pushing at it.
+    private let unavailableRunLimit = 3
 
     private func upload(
         _ file: URL, _ item: PHAsset, to session: Session, _ account: Account
@@ -269,10 +290,10 @@ final class PhotoBackup {
             await recordFailure(localId, account.id, error.message, file.lastPathComponent)
             return .rejected
         } catch {
-            // Everything that is not an `ImogenError` arrives here raw: an upload is
-            // multipart, so the SDK will not replay it and rethrows whatever it caught.
-            // A cancelled pass and a dropped connection both look exactly like a rejection
-            // from this side and are neither, so they must not spend the file's attempts.
+            // Everything that is not an `ImogenError` arrives here raw, once whatever
+            // retrying the SDK could do has run out. A cancelled pass and a dropped
+            // connection both look exactly like a rejection from this side and are
+            // neither, so they must not spend the file's attempts.
             guard uploadAttemptWasSpent(on: error) else { return .unavailable }
             // Charged to the file, so answered like the rejection above it rather than
             // like a server having a bad day: `.unavailable` stops the whole pass, and one
