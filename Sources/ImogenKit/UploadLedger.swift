@@ -216,8 +216,7 @@ public actor UploadLedger {
 
     /// Newest first, then a fixed order. The ledger is a dictionary, so rows sharing a
     /// timestamp come out in no particular order and a bare sort on the timestamp alone
-    /// would reshuffle them on every reload. The tie-break also puts one photograph's two
-    /// destinations next to each other, which is where a reader expects them.
+    /// would reshuffle them on every reload.
     private static func newestFirst(_ lhs: UploadFailure, _ rhs: UploadFailure) -> Bool {
         if lhs.record.uploadedAt != rhs.record.uploadedAt {
             return lhs.record.uploadedAt > rhs.record.uploadedAt

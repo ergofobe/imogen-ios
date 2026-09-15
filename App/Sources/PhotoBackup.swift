@@ -273,12 +273,14 @@ final class PhotoBackup {
             // multipart, so the SDK will not replay it and rethrows whatever it caught.
             // A cancelled pass and a dropped connection both look exactly like a rejection
             // from this side and are neither, so they must not spend the file's attempts.
-            if uploadAttemptWasSpent(on: error) {
-                await recordFailure(
-                    localId, account.id, error.localizedDescription, file.lastPathComponent
-                )
-            }
-            return .unavailable
+            guard uploadAttemptWasSpent(on: error) else { return .unavailable }
+            // Charged to the file, so answered like the rejection above it rather than
+            // like a server having a bad day: `.unavailable` stops the whole pass, and one
+            // bad file must not cost the other three thousand their night.
+            await recordFailure(
+                localId, account.id, error.localizedDescription, file.lastPathComponent
+            )
+            return .rejected
         }
     }
 
