@@ -49,6 +49,37 @@ public struct UploadRecord: Codable, Hashable, Sendable {
     public var name: String { displayName ?? localId }
 }
 
+/// One outstanding upload: a photograph *and* the destination it has not reached.
+///
+/// The ledger is keyed per account, so the same photograph failing on two servers is two
+/// of these, not one. See `id` for why that has to be said out loud.
+public struct UploadFailure: Identifiable, Hashable, Sendable {
+    public var account: Account
+    public var record: UploadRecord
+
+    public init(account: Account, record: UploadRecord) {
+        self.account = account
+        self.record = record
+    }
+
+    /// Account and photograph together, which is the ledger's own key and the only pair
+    /// that is unique: `localId` names the photograph, and choosing two destinations means
+    /// the same one can fail twice. Keyed on the photograph alone, SwiftUI draws one row
+    /// for two failures and the destination it dropped keeps its `givenUp` for ever.
+    ///
+    /// Two fields rather than a joined string because a `localId` contains slashes of its
+    /// own, and nothing here is worth a separator that could be misread.
+    ///
+    /// Neither field moves when `retry` rewrites the row's attempts and error, so the
+    /// reload that follows a retry leaves rows where they were instead of rebuilding them.
+    public struct ID: Hashable, Sendable {
+        public var accountId: String
+        public var localId: String
+    }
+
+    public var id: ID { ID(accountId: account.id, localId: record.localId) }
+}
+
 /// Whether a failed file will be tried again on its own.
 public enum FailureState: Equatable {
     /// Attempts remain; the next pass picks it up without being asked.
@@ -127,6 +158,32 @@ public actor UploadLedger {
         records(for: accountId).values
             .filter { !$0.isDone }
             .sorted { $0.uploadedAt > $1.uploadedAt }
+    }
+
+    /// Everything outstanding across several destinations, newest first.
+    ///
+    /// Flattened here rather than at the call site so that the pairing is covered by a
+    /// test: one entry per destination, never one per photograph.
+    public func failures(for accounts: [Account]) -> [UploadFailure] {
+        accounts
+            .flatMap { account in
+                failures(for: account.id).map { UploadFailure(account: account, record: $0) }
+            }
+            .sorted(by: Self.newestFirst)
+    }
+
+    /// Newest first, then a fixed order. The ledger is a dictionary, so rows sharing a
+    /// timestamp come out in no particular order and a bare sort on the timestamp alone
+    /// would reshuffle them on every reload. The tie-break also puts one photograph's two
+    /// destinations next to each other, which is where a reader expects them.
+    private static func newestFirst(_ lhs: UploadFailure, _ rhs: UploadFailure) -> Bool {
+        if lhs.record.uploadedAt != rhs.record.uploadedAt {
+            return lhs.record.uploadedAt > rhs.record.uploadedAt
+        }
+        if lhs.record.localId != rhs.record.localId {
+            return lhs.record.localId < rhs.record.localId
+        }
+        return lhs.account.id < rhs.account.id
     }
 
     /// Puts one file back in the running.

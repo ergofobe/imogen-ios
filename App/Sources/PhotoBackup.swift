@@ -294,14 +294,8 @@ final class PhotoBackup {
     }
 
     /// Everything outstanding, across every destination.
-    func failures(_ model: AppModel) async -> [(account: Account, record: UploadRecord)] {
-        var all: [(Account, UploadRecord)] = []
-        for account in model.accounts.book.backingUpTo {
-            for record in await ledger.failures(for: account.id) {
-                all.append((account, record))
-            }
-        }
-        return all.sorted { $0.1.uploadedAt > $1.1.uploadedAt }
+    func failures(_ model: AppModel) async -> [UploadFailure] {
+        await ledger.failures(for: model.accounts.book.backingUpTo)
     }
 
     func retry(_ localId: String, for accountId: String, model: AppModel) async {
