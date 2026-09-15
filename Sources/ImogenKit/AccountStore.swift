@@ -82,7 +82,16 @@ public final class AccountStore {
 
     public init(storage: AccountStorage = KeychainAccountStorage()) {
         self.storage = storage
-        self.book = (try? storage.load()) ?? AccountBook()
+        do {
+            self.book = try storage.load()
+        } catch {
+            // An empty book only so there is something to draw. It is explicitly not a
+            // claim about the device, which is why the store seals itself in the same
+            // breath — see `accountsUnreadable`.
+            self.book = AccountBook()
+            self.accountsUnreadable = true
+            self.lastFailure = AccountStoreFailure(kind: .read, error: error)
+        }
     }
 
     public var accounts: [Account] { book.accounts }
@@ -128,6 +137,17 @@ public final class AccountStore {
         var updated = book
         apply(&updated)
         book = updated
+
+        // A book built on a read that failed is not the device's book, and writing it
+        // would replace every account and refresh token on the device with the one or two
+        // this session happens to know about. A refresh token cannot be re-derived, so
+        // this is the one failure worth refusing outright rather than reporting after.
+        //
+        // The read failure already on `lastFailure` is left where it is: it is the cause,
+        // it is still true, and naming this change instead would replace the one line
+        // that says the accounts are still on the device.
+        guard !accountsUnreadable else { return }
+
         do {
             try storage.save(updated)
             lastFailure = nil
