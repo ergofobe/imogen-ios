@@ -123,6 +123,12 @@ final class PendingSignInReadTests: XCTestCase {
         guard case .pendingSignInUnreadable = error as? LinkError else {
             return XCTFail("expected an unreadable pending sign-in, got \(String(describing: error))")
         }
+        // The same dead end as a refusal, and not the same cause. Blaming a locked device
+        // for a record that will not decode is the wrong diagnosis this case exists to
+        // stop being given.
+        let message = try XCTUnwrap((error as? LinkError)?.localizedDescription)
+        XCTAssertFalse(message.contains("locked is the usual reason"))
+        XCTAssertTrue(message.contains("could not be understood"))
     }
 
     /// Nothing is lost when this happens — the code in the callback expires unspent — so

@@ -36,16 +36,29 @@ public enum LinkError: Error, LocalizedError {
             // Nothing is lost, and saying so is the point: the authorization code in the
             // callback simply expires unspent, so starting again is a complete remedy
             // rather than a shrug.
-            // "Once it is unlocked", not "try again": a retry on a device still refusing
-            // reads is refused at the *write* that starts the next sign-in, and comes
-            // back as a bare keychain status with no remedy in it at all.
+            //
+            // "With the device unlocked", not "try again": a retry while the keychain is
+            // still refusing is refused at the *write* that starts the next sign-in, and
+            // comes back as a bare status with no remedy in it at all.
             "The sign-in you started could not be read back from this device, so it "
-                + "cannot be completed. A device that was still locked is the usual "
-                + "reason. Nothing has been lost — once it is unlocked, signing in again "
-                + "will work. "
-                + ((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
+                + "cannot be completed. \(LinkError.cause(error)) Nothing has been lost — "
+                + "with the device unlocked, signing in again will work."
         case .server(let message): message
         }
+    }
+
+    /// Why the record could not be read, in words that fit the reason there is.
+    ///
+    /// A refusal and a record that will not decode are the same dead end and not the same
+    /// cause. Saying "a device that was locked" over a `DecodingError` would be a wrong
+    /// diagnosis of exactly the kind this case exists to stop — and Foundation's own words
+    /// for that one ("isn't in the correct format") name nothing a person can act on.
+    private static func cause(_ error: any Error) -> String {
+        guard let keychain = error as? KeychainError else {
+            return "The record of it was there but could not be understood."
+        }
+        return "A device that was still locked is the usual reason. "
+            + (keychain.errorDescription ?? "")
     }
 }
 

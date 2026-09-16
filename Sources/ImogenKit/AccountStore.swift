@@ -58,6 +58,12 @@ struct StoredAccounts: Codable {
     /// Bumped when the *representation* changes in a way tolerant decoding cannot absorb
     /// — a field whose type or meaning changes, a key that is renamed — not a field that
     /// is merely added.
+    ///
+    /// Bumping it obliges whoever does to give `init(from:)` a branch for every version
+    /// below the new one, because by the definition above a payload written before the
+    /// bump can no longer be read by the rules after it. There is no such branch today
+    /// and there should not be: one version has nothing to migrate from, and machinery
+    /// with no case to serve is machinery nobody has ever seen run.
     static let currentVersion = 1
 
     /// What a payload carrying no marker is. Every device in the field holds one, and its
@@ -226,6 +232,10 @@ public final class AccountStore {
         // updating. A remedy beside a denial that there is one is worse than either.
         case AccountStorageError.unreadable(let underlying) where underlying is AccountsFromNewerBuild:
             .savedByNewerBuild
+        // And unwrapped, from any storage that raises it directly. Falling through to
+        // `unreadable` would hand back the paragraph saying there is no remedy for a
+        // payload whose remedy is an update — which is the confusion above, restored.
+        case is AccountsFromNewerBuild: .savedByNewerBuild
         default: .unreadable
         }
     }
