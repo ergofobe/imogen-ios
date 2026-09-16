@@ -214,9 +214,176 @@ final class BackupPassTests: XCTestCase {
         // Only "b" was ever written to disk, so only "b" is disposed of.
         XCTAssertEqual(world.disposed.count, 1)
 
-        // And nothing is recorded against it, so every later pass exports it again.
+        // A file the device cannot read is this file's own problem, so it spends an
+        // attempt and is eventually folded away rather than exported on every pass for
+        // ever — and the destination cannot claim it reached everything.
+        let attempts = await ledger.attempts("a", for: "one")
+        XCTAssertEqual(attempts, 1)
+    }
+
+    // MARK: - Being cut short
+
+    func testACancellationSpendsNoAttempt() async {
+        let ledger = self.ledger()
+        let world = World()
+        world.answers["a"] = .failure(CancellationError())
+
+        _ = await runBackupPass(
+            ["a"], to: [account("one")], ledger: ledger, effects: world.effects()
+        )
+
+        // A `BGProcessingTask` expiring is routine overnight behaviour, not this file's
+        // fault. ergofobe/imogen-ios#39.
         let attempts = await ledger.attempts("a", for: "one")
         XCTAssertEqual(attempts, 0)
+    }
+
+    func testAURLSessionCancellationSpendsNoAttempt() async {
+        let ledger = self.ledger()
+        let world = World()
+        // URLSession answers a cancelled task with this, not a `CancellationError`, and
+        // the SDK rethrows it raw because a multipart body is not replayed.
+        world.answers["a"] = .failure(URLError(.cancelled))
+
+        _ = await runBackupPass(
+            ["a"], to: [account("one")], ledger: ledger, effects: world.effects()
+        )
+
+        let attempts = await ledger.attempts("a", for: "one")
+        XCTAssertEqual(attempts, 0)
+    }
+
+    func testACancelledPassDoesNotBlameTheServer() async {
+        let ledger = self.ledger()
+        let world = World()
+        world.answers["a"] = .failure(CancellationError())
+
+        let outcome = await runBackupPass(
+            ["a"], to: [account("one")], ledger: ledger, effects: world.effects()
+        )
+
+        // "Couldn't reach the server" is not what happened.
+        XCTAssertNil(outcome.message)
+        XCTAssertTrue(outcome.completedDestinations.isEmpty)
+    }
+
+    func testCancellationsNeverAbandonTheFile() async {
+        let ledger = self.ledger()
+        for _ in 1...(maxUploadAttempts + 1) {
+            let world = World()
+            world.answers["a"] = .failure(CancellationError())
+            _ = await runBackupPass(
+                ["a"], to: [account("one")], ledger: ledger, effects: world.effects()
+            )
+        }
+
+        // Three expiries used to reach `givenUp`, where `settled(for:)` folds the file
+        // away and no later pass ever mentions it again.
+        let settled = await ledger.settled(for: "one")
+        XCTAssertFalse(settled.contains("a"))
+
+        let after = World()
+        _ = await runBackupPass(
+            ["a"], to: [account("one")], ledger: ledger, effects: after.effects()
+        )
+        XCTAssertEqual(after.uploads.map(\.localId), ["a"])
+    }
+
+    func testAFileCutShortRepeatedlyStopsHoldingUpTheQueue() async {
+        let ledger = self.ledger()
+        let one = account("one")
+
+        // "b" is the big video: every window runs out before it finishes.
+        for pass in 1...deferAfterInterruptions {
+            let world = World()
+            world.answers["b"] = .failure(CancellationError())
+            _ = await runBackupPass(
+                ["a", "b", "c"], to: [one], ledger: ledger, effects: world.effects()
+            )
+            // The pass stops where it was cut short, so "c" never gets a look in.
+            XCTAssertFalse(world.uploads.map(\.localId).contains("c"), "pass \(pass)")
+        }
+
+        let world = World()
+        world.answers["b"] = .failure(CancellationError())
+        _ = await runBackupPass(
+            ["a", "b", "c"], to: [one], ledger: ledger, effects: world.effects()
+        )
+
+        // "a" is settled by now, so this pass is "c" first and the video last — which is
+        // the bound that replaces giving up on it.
+        XCTAssertEqual(world.uploads.map(\.localId), ["c", "b"])
+    }
+
+    func testGettingThroughPutsTheFileBackInItsPlace() async {
+        let ledger = self.ledger()
+        await ledger.recordInterruption("b", for: "one")
+        await ledger.recordInterruption("b", for: "one")
+
+        let world = World()
+        _ = await runBackupPass(
+            ["a", "b"], to: [account("one")], ledger: ledger, effects: world.effects()
+        )
+
+        let left = await ledger.interruptions(for: "one")
+        XCTAssertTrue(left.isEmpty)
+    }
+
+    // MARK: - One destination's bad day is not another's
+
+    func testAnUnreachableDestinationDoesNotStopAHealthyOne() async {
+        let ledger = self.ledger()
+        let world = World()
+        world.answers["two/a"] = .failure(transient())
+        world.answers["two/b"] = .failure(transient())
+
+        let outcome = await runBackupPass(
+            ["a", "b"], to: [account("one"), account("two")],
+            ledger: ledger, effects: world.effects()
+        )
+
+        // Both files reach the healthy server; the dead one is dropped after one refusal
+        // rather than being pushed at again.
+        XCTAssertEqual(
+            world.uploads.filter { $0.accountId == "one" }.map(\.localId), ["a", "b"]
+        )
+        XCTAssertEqual(
+            world.uploads.filter { $0.accountId == "two" }.map(\.localId), ["a"]
+        )
+        XCTAssertEqual(outcome.uploaded, 2)
+    }
+
+    func testOnlyDestinationsThatGotEverythingAreStamped() async {
+        let ledger = self.ledger()
+        let world = World()
+        world.answers["two/a"] = .failure(transient())
+
+        let outcome = await runBackupPass(
+            ["a"], to: [account("one"), account("two")],
+            ledger: ledger, effects: world.effects()
+        )
+
+        // A dead second server freezing a healthy server's timestamp is the regression
+        // ergofobe/imogen-ios#37 shipped a global flag for.
+        XCTAssertEqual(outcome.completedDestinations, ["one"])
+        let healthy = await ledger.lastCompleted(for: "one")
+        let dead = await ledger.lastCompleted(for: "two")
+        XCTAssertNotNil(healthy)
+        XCTAssertNil(dead)
+    }
+
+    func testARejectionKeepsTheDestinationFromClaimingCompletion() async {
+        let ledger = self.ledger()
+        let world = World()
+        world.answers["a"] = .failure(permanent())
+
+        let outcome = await runBackupPass(
+            ["a", "b"], to: [account("one")], ledger: ledger, effects: world.effects()
+        )
+
+        XCTAssertTrue(outcome.completedDestinations.isEmpty)
+        let stamped = await ledger.lastCompleted(for: "one")
+        XCTAssertNil(stamped)
     }
 
     // MARK: - Stopping
@@ -270,5 +437,67 @@ final class UploadDispositionTests: XCTestCase {
     func testARequestThatNeverReachedAServerIsTheServersProblem() {
         let error = ImogenError(status: 0, code: "http_error", message: "Request failed")
         XCTAssertEqual(uploadDisposition(of: error), .unavailable)
+    }
+}
+
+
+/// The queue order, which is what keeps one unfinishable file from holding up a library.
+final class PassOrderTests: XCTestCase {
+
+    func testNothingMovesWithoutInterruptions() {
+        XCTAssertEqual(passOrder(["a", "b", "c"], deferring: [:]), ["a", "b", "c"])
+    }
+
+    func testAFileUnderTheLimitKeepsItsPlace() {
+        let order = passOrder(
+            ["a", "b", "c"], deferring: ["b": deferAfterInterruptions - 1]
+        )
+        XCTAssertEqual(order, ["a", "b", "c"])
+    }
+
+    func testARepeatedlyInterruptedFileGoesToTheBack() {
+        let order = passOrder(["a", "b", "c"], deferring: ["a": deferAfterInterruptions])
+        XCTAssertEqual(order, ["b", "c", "a"])
+    }
+
+    func testDeferredFilesKeepTheirOrderAmongstThemselves() {
+        let order = passOrder(
+            ["a", "b", "c", "d"],
+            deferring: ["a": deferAfterInterruptions, "c": deferAfterInterruptions + 4]
+        )
+        // Oldest first still, within each group. The library was read in that order for a
+        // reason, and shuffling it would make the count unreadable.
+        XCTAssertEqual(order, ["b", "d", "a", "c"])
+    }
+}
+
+/// The two shapes a cancellation arrives in. Verified against the SDK's own rethrow path:
+/// `HTTPClient.send` sets `replayable = !options.isMultipart`, and a small upload is sent
+/// `isMultipart: true`.
+final class CancellationShapeTests: XCTestCase {
+
+    func testACancellationErrorCostsNothing() {
+        XCTAssertEqual(uploadDisposition(of: CancellationError()), .cancelled)
+        XCTAssertFalse(uploadDisposition(of: CancellationError()).spendsAttempt)
+    }
+
+    func testURLSessionsCancellationCostsNothing() {
+        let error = URLError(.cancelled)
+        XCTAssertEqual(uploadDisposition(of: error), .cancelled)
+        XCTAssertFalse(uploadDisposition(of: error).spendsAttempt)
+    }
+
+    func testAnotherURLErrorIsTheNetworksProblem() {
+        for code in [URLError.notConnectedToInternet, .timedOut, .networkConnectionLost] {
+            XCTAssertEqual(uploadDisposition(of: URLError(code)), .unavailable)
+        }
+    }
+
+    func testAnythingElseIsTheFilesOwnProblem() {
+        struct Unreadable: Error {}
+        // Otherwise a file the device cannot read is exported afresh by every pass, for
+        // ever, and nothing on screen ever says so.
+        XCTAssertEqual(uploadDisposition(of: Unreadable()), .rejected)
+        XCTAssertTrue(uploadDisposition(of: Unreadable()).spendsAttempt)
     }
 }

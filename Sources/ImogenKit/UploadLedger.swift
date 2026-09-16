@@ -115,6 +115,7 @@ public let maxUploadAttempts = 3
 public actor UploadLedger {
     private let directory: URL
     private var loaded: [String: [String: UploadRecord]] = [:]
+    private var loadedInterruptions: [String: [String: Int]] = [:]
 
     public init(directory: URL) {
         self.directory = directory
@@ -194,6 +195,7 @@ public actor UploadLedger {
     /// current answer.
     public func retry(_ localId: String, for accountId: String) {
         guard let existing = records(for: accountId)[localId], !existing.isDone else { return }
+        clearInterruption(localId, for: accountId)
         put(
             UploadRecord(
                 localId: existing.localId,
@@ -224,6 +226,37 @@ public actor UploadLedger {
         return at
     }
 
+    /// How often a pass has been cut short while sending each file to this account.
+    ///
+    /// Beside the ledger rather than inside it, for the reason `completedFile` gives: the
+    /// ledger's file is what must never be lost, and this is a hint about queue order that
+    /// can be thrown away without costing anybody a photograph.
+    public func interruptions(for accountId: String) -> [String: Int] {
+        if let cached = loadedInterruptions[accountId] { return cached }
+        let decoded = (try? Data(contentsOf: interruptionsFile(for: accountId)))
+            .flatMap { try? JSONDecoder().decode([String: Int].self, from: $0) }
+            ?? [:]
+        loadedInterruptions[accountId] = decoded
+        return decoded
+    }
+
+    /// A pass was stopped part-way through this file. Deliberately not an attempt: being
+    /// cut short is nobody's fault, and spending an attempt on it is what abandoned a
+    /// large video after three overnight expiries. See `passOrder(_:deferring:)`.
+    public func recordInterruption(_ localId: String, for accountId: String) {
+        var current = interruptions(for: accountId)
+        current[localId] = (current[localId] ?? 0) + 1
+        writeInterruptions(current, for: accountId)
+    }
+
+    /// The file got through, or somebody asked for it to be tried properly. Either way it
+    /// goes back to its place in the queue.
+    public func clearInterruption(_ localId: String, for accountId: String) {
+        var current = interruptions(for: accountId)
+        guard current.removeValue(forKey: localId) != nil else { return }
+        writeInterruptions(current, for: accountId)
+    }
+
     public func recordCompleted(at moment: Double, for accountId: String) {
         guard let data = try? JSONEncoder().encode(moment) else { return }
         try? data.write(to: completedFile(for: accountId), options: .atomic)
@@ -235,8 +268,16 @@ public actor UploadLedger {
 
     public func forget(accountId: String) {
         loaded[accountId] = nil
+        loadedInterruptions[accountId] = nil
         try? FileManager.default.removeItem(at: file(for: accountId))
         try? FileManager.default.removeItem(at: completedFile(for: accountId))
+        try? FileManager.default.removeItem(at: interruptionsFile(for: accountId))
+    }
+
+    private func writeInterruptions(_ counts: [String: Int], for accountId: String) {
+        loadedInterruptions[accountId] = counts
+        guard let data = try? JSONEncoder().encode(counts) else { return }
+        try? data.write(to: interruptionsFile(for: accountId), options: .atomic)
     }
 
     private func persist(_ accountId: String) {
@@ -255,5 +296,9 @@ public actor UploadLedger {
     /// lost, for the sake of one number.
     private func completedFile(for accountId: String) -> URL {
         directory.appendingPathComponent("completed-\(accountId).json")
+    }
+
+    private func interruptionsFile(for accountId: String) -> URL {
+        directory.appendingPathComponent("interrupted-\(accountId).json")
     }
 }
