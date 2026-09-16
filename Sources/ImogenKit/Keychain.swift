@@ -32,7 +32,19 @@ public struct KeychainError: Error, LocalizedError, Equatable {
     }
 }
 
-public struct Keychain: Sendable {
+/// Somewhere to keep one secret.
+///
+/// A protocol so that a caller can be given a store that refuses: the refusals that
+/// matter — a locked device, the keybag race at launch — cannot be provoked portably, and
+/// a seam is the only way to test what the app does about them.
+public protocol SecretStorage: Sendable {
+    /// What is stored, or nil when nothing is. Every other refusal throws; see `Keychain`.
+    func read() throws -> Data?
+    func write(_ data: Data) throws
+    func delete()
+}
+
+public struct Keychain: SecretStorage {
     private let service: String
     private let account: String
 

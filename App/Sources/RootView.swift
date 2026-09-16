@@ -481,15 +481,21 @@ private struct AccountsUnreadableView: View {
                 // button below stays its own, or it could not be reached.
                 .accessibilityElement(children: .combine)
 
-                // Always available, whichever kind: a read costs nothing, and a screen
-                // that says "unlocking it and trying again should bring them up" to
-                // somebody already unlocked and already here needs something for them to
-                // try. It is also the only way out of a seal inside one launch — the
-                // automatic reread waits for a foreground transition that a launch
-                // refused at startup never produces.
-                Button("Try again", action: tryAgain)
-                    .buttonStyle(.borderedProminent)
-                    .padding(.top, 8)
+                // A read costs nothing, and a screen that says "unlocking it and trying
+                // again should bring them up" to somebody already unlocked and already
+                // here needs something for them to try. It is also the only way out of a
+                // seal inside one launch — the automatic reread waits for a foreground
+                // transition that a launch refused at startup never produces.
+                //
+                // Every kind but one. A payload from a newer build decodes exactly the
+                // same way until imogen is updated, and the paragraph above already says
+                // so: a button here would be offering the one thing that cannot work,
+                // beside a sentence naming the thing that can.
+                if failure.kind != .savedByNewerBuild {
+                    Button("Try again", action: tryAgain)
+                        .buttonStyle(.borderedProminent)
+                        .padding(.top, 8)
+                }
             }
 
             // A pairing link or an OAuth redirect arrives through `onOpenURL` wherever

@@ -42,6 +42,36 @@ public struct Account: Codable, Hashable, Identifiable, Sendable {
         self.backupEnabled = backupEnabled
     }
 
+    /// Decoded by hand so that a payload written before a field existed still reads.
+    ///
+    /// The synthesized decoder requires every key, which means the first release that
+    /// stores something new cannot read anything the release before it wrote — for every
+    /// device at once, on upgrade. Only tolerant decoding fixes that; a version marker
+    /// labels the payload, it does not decode it.
+    ///
+    /// What is required here is what an account cannot function without. The rest falls
+    /// back, and `StoredAccountCodingTests` walks a real payload to hold the line, because
+    /// a rule about what may be added is a rule somebody has to remember and a test is not.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Identity. An id invented here is not the one `activeAccountId` names, so the
+        // account would come back adrift rather than come back.
+        id = try container.decode(String.self, forKey: .id)
+        // Reachability. Every request this account makes is built from these three, and
+        // a refresh needs the client registration as much as the address.
+        serverURL = try container.decode(String.self, forKey: .serverURL)
+        userId = try container.decode(String.self, forKey: .userId)
+        clientId = try container.decode(String.self, forKey: .clientId)
+        tokens = try container.decode(TokenSet.self, forKey: .tokens)
+        // Display only. A nameless row in the account list is ugly; it is not a reason to
+        // refuse the refresh token sitting beside it.
+        email = try container.decodeIfPresent(String.self, forKey: .email) ?? ""
+        name = try container.decodeIfPresent(String.self, forKey: .name) ?? ""
+        // Off. Copying somebody's photographs to a server is their decision, and a key
+        // that is not there is not that decision.
+        backupEnabled = try container.decodeIfPresent(Bool.self, forKey: .backupEnabled) ?? false
+    }
+
     /// What to call the server when there is no better name than its address.
     public var serverLabel: String {
         URL(string: serverURL)?.host().map { host in
@@ -72,6 +102,20 @@ public struct TokenSet: Codable, Hashable, Sendable {
         self.scope = scope
     }
 
+    /// Tolerant for the same reason `Account`'s is. See the note there.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Required: without it there is no request to make and, on a token set with no
+        // refresh token either, nothing left of the account at all.
+        accessToken = try container.decode(String.self, forKey: .accessToken)
+        refreshToken = try container.decodeIfPresent(String.self, forKey: .refreshToken)
+        // An unknown expiry defaults to an expired token rather than a live one: being
+        // wrong that way costs a refresh, and being wrong the other way costs a request.
+        obtainedAt = try container.decodeIfPresent(Double.self, forKey: .obtainedAt) ?? 0
+        expiresIn = try container.decodeIfPresent(Int.self, forKey: .expiresIn) ?? 0
+        scope = try container.decodeIfPresent(String.self, forKey: .scope) ?? ""
+    }
+
     /// A minute of slack. A token that expires while a request is in flight costs a round
     /// trip and a retry; refreshing one a minute early costs nothing.
     public func isExpired(at now: Double, skewSeconds: Int = 60) -> Bool {
@@ -87,6 +131,16 @@ public struct AccountBook: Codable, Hashable, Sendable {
     public init(accounts: [Account] = [], activeAccountId: String? = nil) {
         self.accounts = accounts
         self.activeAccountId = activeAccountId
+    }
+
+    /// Tolerant for the same reason `Account`'s is, with one key that is not.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        // Required, alone among these. An absent list would decode as a device with no
+        // accounts on it, and the next save writes that emptiness over the accounts that
+        // are really there — which is #34 arriving through a different door.
+        accounts = try container.decode([Account].self, forKey: .accounts)
+        activeAccountId = try container.decodeIfPresent(String.self, forKey: .activeAccountId)
     }
 
     public var active: Account? {

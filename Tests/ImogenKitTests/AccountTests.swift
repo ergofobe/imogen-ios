@@ -338,7 +338,24 @@ private final class UnreadableStorage: AccountStorage, @unchecked Sendable {
     }
 }
 
+/// Storage that raises the newer-build refusal without wrapping it, which is what any
+/// store that is not the keychain one would do.
+private struct FromTheFutureStorage: AccountStorage {
+    func load() throws -> AccountBook { throw AccountsFromNewerBuild(version: 99) }
+    func save(_ book: AccountBook) throws {}
+}
+
 final class AccountLoadFailureTests: XCTestCase {
+
+    /// Wrapped or not, it is the same news and must not fall through to the paragraph
+    /// that says there is no remedy for a payload whose remedy is an update.
+    @MainActor
+    func testTheNewerBuildRefusalIsRecognisedUnwrappedToo() throws {
+        let store = AccountStore(storage: FromTheFutureStorage())
+
+        XCTAssertEqual(store.lastFailure?.kind, .savedByNewerBuild)
+        XCTAssertTrue(store.accountsUnreadable)
+    }
 
     @MainActor
     private func store(_ storage: AccountStorage) -> AccountStore {
@@ -605,5 +622,344 @@ private final class FlakyStorage: AccountStorage, @unchecked Sendable {
     func save(_ book: AccountBook) throws {
         if refusing { throw KeychainError(status: errSecInteractionNotAllowed) }
         lock.withLock { self.book = book }
+    }
+}
+
+/// The stored account payload, read by a build that is not the one that wrote it.
+///
+/// This is the app's compatibility surface with its own past and its own future, and the
+/// only one this target has. Everything here works on payloads produced by the real
+/// encoder, because a hand-rolled fixture only proves what the fixture's author expected.
+final class StoredAccountCodingTests: XCTestCase {
+
+    /// The whole of #43, simulated with production code only: a payload written by a build
+    /// that predates a field, read by a build that has it.
+    ///
+    /// `backupEnabled` stands in for whatever field is added next — remove it from a real
+    /// encoding and the result is byte-for-byte what the release before it wrote.
+    func testAPayloadWrittenBeforeAFieldExistedStillDecodes() throws {
+        let encoded = try JSONEncoder().encode(furnishedBook())
+        var payload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        var accounts = try XCTUnwrap(payload["accounts"] as? [[String: Any]])
+        accounts[0].removeValue(forKey: "backupEnabled")
+        payload["accounts"] = accounts
+
+        let older = try JSONSerialization.data(withJSONObject: payload)
+        let decoded = try JSONDecoder().decode(AccountBook.self, from: older)
+
+        XCTAssertEqual(decoded.accounts.map(\.id), ["a"])
+        // The safe default, not the one that was there: backup is somebody's decision to
+        // make, and a field that has gone missing is not that decision.
+        XCTAssertFalse(decoded.accounts[0].backupEnabled)
+    }
+
+    /// The teeth. Every key in a real payload is removed in turn, and the decode has to
+    /// survive unless that key is named below with a reason.
+    ///
+    /// A field added tomorrow arrives here as a path nobody listed, and the choice about
+    /// it gets made deliberately instead of being discovered by every device at once on
+    /// upgrade. That is the part a rule could not do: a rule has to be remembered.
+    func testOnlyTheKeysAnAccountCannotFunctionWithoutAreRequired() throws {
+        let required: Set<String> = [
+            // An absent list decodes as a device with no accounts and invites the write
+            // that replaces the ones really there.
+            "accounts",
+            // The identity `activeAccountId` and every stored reference name.
+            "accounts[].id",
+            // Where this account is and who it is. Nothing can be asked without them.
+            "accounts[].serverURL",
+            "accounts[].userId",
+            // The registration every refresh has to present again.
+            "accounts[].clientId",
+            // No credential at all is not an account, it is a row.
+            "accounts[].tokens",
+            "accounts[].tokens.accessToken",
+        ]
+
+        let payload = try JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(StoredAccounts(book: furnishedBook()))
+        )
+        let variants = payloadsMissingEachKey(payload)
+        // A payload that walked to nothing would pass every assertion below by vacuity.
+        XCTAssertGreaterThan(variants.count, 10)
+        XCTAssertTrue(
+            required.isSubset(of: Set(variants.map(\.path))),
+            "required names a key that is no longer written: "
+                + "\(required.subtracting(Set(variants.map(\.path))))"
+        )
+
+        for (path, without) in variants {
+            let data = try JSONSerialization.data(withJSONObject: without)
+            let decoded = try? JSONDecoder().decode(StoredAccounts.self, from: data)
+
+            if required.contains(path) {
+                XCTAssertNil(decoded, "\(path) is listed as required but decoding survived it")
+            } else {
+                XCTAssertNotNil(
+                    decoded,
+                    "a payload without \(path) did not decode. Either give it a default, "
+                        + "or add it to `required` above with the reason it is one."
+                )
+            }
+        }
+    }
+
+    /// The trap on the other side of a hand-written decoder: `encode(to:)` stays
+    /// synthesized and writes every new field, so a decoder that forgets one ignores it
+    /// silently and for ever. Round-tripping a fully furnished book is what notices.
+    func testEveryStoredFieldSurvivesTheRoundTrip() throws {
+        let book = furnishedBook()
+
+        let encoded = try JSONEncoder().encode(StoredAccounts(book: book))
+        let decoded = try JSONDecoder().decode(StoredAccounts.self, from: encoded)
+
+        XCTAssertEqual(decoded.book, book)
+        XCTAssertEqual(decoded.version, StoredAccounts.currentVersion)
+    }
+
+    /// And what keeps that test honest: a field the fixture left at its default would
+    /// round-trip identically whether the decoder read it or dropped it. So every value
+    /// the fixture writes has to differ from the value a bare book would write there.
+    func testTheFixtureLeavesNoStoredFieldAtItsDefault() throws {
+        let furnished = try leaves(of: StoredAccounts(book: furnishedBook()))
+        let bare = try leaves(of: StoredAccounts(book: bareBook()))
+
+        for (path, value) in furnished where path != "version" {
+            // `version` is the format marker rather than a stored value: it is the same
+            // in every payload this build writes, which is the whole of its job.
+            guard let same = bare[path] else { continue }
+            XCTAssertNotEqual(
+                value, same,
+                "the fixture leaves \(path) at its default, so the round-trip test cannot "
+                    + "tell a decoder that reads it from one that drops it"
+            )
+        }
+    }
+
+    /// Every device in the field holds a payload with no marker on it. It is not corrupt
+    /// and it is not from the future: it is the shape version 1 describes.
+    func testAPayloadWithNoMarkerReadsAsTheShapeEveryDeviceAlreadyHolds() throws {
+        let unmarked = try JSONEncoder().encode(furnishedBook())
+
+        let decoded = try JSONDecoder().decode(StoredAccounts.self, from: unmarked)
+
+        XCTAssertEqual(decoded.version, StoredAccounts.preMarkerVersion)
+        XCTAssertEqual(decoded.book, furnishedBook())
+    }
+
+    /// The marker sits beside the book's keys rather than wrapping them precisely so that
+    /// this holds: a build that predates the marker reads what this one writes. Wrapping
+    /// would have manufactured the downgrade failure the marker exists to diagnose.
+    ///
+    /// Decoded with `PreMarkerBook` rather than with `AccountBook`: this branch's own
+    /// decoder is deliberately tolerant and would go on passing through a change that
+    /// broke the guarantee, which is the opposite of what a test is for.
+    func testABuildThatPredatesTheMarkerCanStillReadWhatThisOneWrites() throws {
+        let marked = try JSONEncoder().encode(StoredAccounts(book: furnishedBook()))
+
+        let downgraded = try JSONDecoder().decode(PreMarkerBook.self, from: marked)
+
+        XCTAssertEqual(downgraded.activeAccountId, "a")
+        XCTAssertEqual(downgraded.accounts.map(\.id), ["a"])
+        XCTAssertEqual(downgraded.accounts[0].tokens.refreshToken, "refresh")
+        XCTAssertTrue(downgraded.accounts[0].backupEnabled)
+    }
+
+    /// The account book exactly as the release before the marker declares it: synthesized
+    /// `Codable`, every key required, nothing tolerated. Frozen on purpose — it is a
+    /// record of what is already installed on people's phones, so a field added to
+    /// `Account` tomorrow must *not* be added here.
+    private struct PreMarkerBook: Codable {
+        struct StoredAccount: Codable {
+            struct StoredTokens: Codable {
+                let accessToken: String
+                let refreshToken: String?
+                let obtainedAt: Double
+                let expiresIn: Int
+                let scope: String
+            }
+
+            let id: String
+            let serverURL: String
+            let userId: String
+            let email: String
+            let name: String
+            let clientId: String
+            let tokens: StoredTokens
+            let backupEnabled: Bool
+        }
+
+        let accounts: [StoredAccount]
+        let activeAccountId: String?
+    }
+
+    /// The case the marker is actually for. Nothing is corrupt, the accounts are intact,
+    /// and telling somebody they are unreadable is what would have them destroy them.
+    func testAPayloadFromANewerBuildSaysSoRatherThanReadingAsCorrupt() throws {
+        var payload = try XCTUnwrap(
+            JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(StoredAccounts(book: furnishedBook()))
+            ) as? [String: Any]
+        )
+        payload["version"] = StoredAccounts.currentVersion + 1
+        let fromTheFuture = try JSONSerialization.data(withJSONObject: payload)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(StoredAccounts.self, from: fromTheFuture)) {
+            guard let newer = $0 as? AccountsFromNewerBuild else {
+                return XCTFail("expected a newer-build refusal, got \($0)")
+            }
+            XCTAssertEqual(newer.version, StoredAccounts.currentVersion + 1)
+            // The remedy has to be in it. "Unreadable" with no remedy is the diagnosis
+            // that sends somebody to replace a payload that was fine all along.
+            XCTAssertEqual(newer.errorDescription?.contains("updating imogen"), true)
+        }
+    }
+
+    /// What closes the gap the three tests above leave open between them: a new *optional*
+    /// field the fixture never sets is encoded as nothing at all, so it appears in no
+    /// payload, generates no variant, and round-trips equal while being silently dropped
+    /// on every reload. The type's own stored properties are the only place it shows.
+    func testTheFixtureWritesEveryPropertyTheseTypesStore() throws {
+        let written = Set(try leaves(of: StoredAccounts(book: furnishedBook())).keys)
+        let book = furnishedBook()
+
+        // Composite properties are skipped where their own leaves are checked instead.
+        assertEveryPropertyIsWritten(by: book, at: "", into: written, skipping: ["accounts"])
+        assertEveryPropertyIsWritten(
+            by: book.accounts[0], at: "accounts[]", into: written, skipping: ["tokens"]
+        )
+        assertEveryPropertyIsWritten(
+            by: book.accounts[0].tokens, at: "accounts[].tokens", into: written
+        )
+    }
+
+    private func assertEveryPropertyIsWritten(
+        by subject: Any,
+        at prefix: String,
+        into written: Set<String>,
+        skipping: Set<String> = [],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        for child in Mirror(reflecting: subject).children {
+            guard let label = child.label, !skipping.contains(label) else { continue }
+            let path = prefix.isEmpty ? label : "\(prefix).\(label)"
+            XCTAssertTrue(
+                written.contains(path),
+                "the fixture writes nothing at \(path), so nothing here can tell a decoder "
+                    + "that reads it from one that drops it. Give it a value in "
+                    + "`furnishedBook`, and leave `bareBook` at the default.",
+                file: file, line: line
+            )
+        }
+    }
+
+    /// The version cannot be bumped without somebody reading what bumping obliges.
+    ///
+    /// By `currentVersion`'s own definition a bump means tolerant decoding can no longer
+    /// absorb the change — so every payload already in the field needs a branch that
+    /// reads it by the old rules, and without one it flows into the new rules and comes
+    /// back as plausible nonsense. The doc comment says so; this is what makes somebody
+    /// read it. `preMarkerVersion` is pinned in the same breath because bumping both is
+    /// the easy mistake, and it would relabel every unmarked payload in the field.
+    func testTheVersionCannotBeBumpedWithoutReadingWhatABumpObliges() {
+        XCTAssertEqual(
+            StoredAccounts.currentVersion, 1,
+            "give `StoredAccounts.init(from:)` a branch that decodes every version below "
+                + "this one by the rules it was written under, then update this test"
+        )
+        XCTAssertEqual(
+            StoredAccounts.preMarkerVersion, 1,
+            "a payload with no marker is version 1 for ever — it is what is already on "
+                + "people's phones, and it does not move when `currentVersion` does"
+        )
+    }
+
+    // MARK: - Walking a real payload
+
+    /// A book with nothing left at its default, so that a key going missing shows in the
+    /// value rather than hiding behind the value it would have defaulted to anyway.
+    private func furnishedBook() -> AccountBook {
+        var populated = account("a", backup: true)
+        populated.email = "someone@example.com"
+        populated.name = "Someone"
+        populated.tokens = TokenSet(
+            accessToken: "access", refreshToken: "refresh", obtainedAt: 1_700_000_000,
+            expiresIn: 7_200, scope: "library:read library:write"
+        )
+        return AccountBook(accounts: [populated], activeAccountId: "a")
+    }
+
+    /// The same shape with every value left at whatever a default gives it.
+    private func bareBook() -> AccountBook {
+        AccountBook(
+            accounts: [
+                Account(
+                    id: "", serverURL: "", userId: "", email: "", name: "", clientId: "",
+                    tokens: TokenSet(
+                        accessToken: "", refreshToken: nil, obtainedAt: 0, expiresIn: 0,
+                        scope: ""
+                    )
+                )
+            ]
+        )
+    }
+
+    /// Every leaf of a real encoding, by path. Written through the encoder rather than
+    /// listed by hand: a list is a thing to keep up to date, and this is what the test
+    /// exists to avoid.
+    private func leaves(of stored: StoredAccounts) throws -> [String: String] {
+        var found: [String: String] = [:]
+        func walk(_ value: Any, at path: String) {
+            if let object = value as? [String: Any] {
+                for (key, child) in object {
+                    walk(child, at: path.isEmpty ? key : "\(path).\(key)")
+                }
+            } else if let array = value as? [Any] {
+                for element in array { walk(element, at: "\(path)[]") }
+            } else {
+                found[path] = String(describing: value)
+            }
+        }
+        walk(try JSONSerialization.jsonObject(with: JSONEncoder().encode(stored)), at: "")
+        return found
+    }
+
+    /// One copy of the payload per key it contains, each with that key removed.
+    ///
+    /// Array indices collapse to `[]`: the fixture holds one account, and a path naming
+    /// an index would read as being about that account rather than about the field.
+    private func payloadsMissingEachKey(
+        _ value: Any, at path: String = ""
+    ) -> [(path: String, payload: Any)] {
+        if let object = value as? [String: Any] {
+            return object.keys.sorted().flatMap { key -> [(path: String, payload: Any)] in
+                let here = path.isEmpty ? key : "\(path).\(key)"
+                var without = object
+                without.removeValue(forKey: key)
+
+                let deeper = payloadsMissingEachKey(object[key] ?? NSNull(), at: here)
+                return [(here, without)]
+                    + deeper.map { found in
+                        var rebuilt = object
+                        rebuilt[key] = found.payload
+                        return (found.path, rebuilt as Any)
+                    }
+            }
+        }
+
+        if let array = value as? [Any] {
+            return array.enumerated().flatMap { index, element in
+                payloadsMissingEachKey(element, at: "\(path)[]").map { found in
+                    var rebuilt = array
+                    rebuilt[index] = found.payload
+                    return (found.path, rebuilt as Any)
+                }
+            }
+        }
+
+        return []
     }
 }

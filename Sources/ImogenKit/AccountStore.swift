@@ -26,6 +26,93 @@ public enum AccountStorageError: Error, LocalizedError {
     }
 }
 
+/// Accounts written by a build that knows something this one does not.
+///
+/// Its own error rather than a decoding failure, because the two call for opposite
+/// answers: nothing here is corrupt, the accounts are intact on the device, and the
+/// remedy is an update rather than the destruction of a payload that was fine all along.
+public struct AccountsFromNewerBuild: Error, LocalizedError, Equatable {
+    public let version: Int
+
+    public init(version: Int) { self.version = version }
+
+    public var errorDescription: String? {
+        "These accounts were saved by a newer version of imogen (format \(version); this "
+            + "one reads \(StoredAccounts.currentVersion)). They are still on the device — "
+            + "updating imogen should bring them back."
+    }
+}
+
+/// The account book as it is stored, with the marker that says which shape it is in.
+///
+/// The marker sits *beside* the book's own keys rather than wrapping them, which is the
+/// whole of why it is safe to start writing one now: a build released before the marker
+/// existed ignores a key it has never heard of, while a wrapper would have made every
+/// payload this release writes unreadable to the release before it — manufacturing the
+/// downgrade failure the marker exists to diagnose.
+///
+/// And that is all a marker can do, in one direction only. It labels; it decodes nothing.
+/// A payload written before a field existed is read by the tolerant decoders on the three
+/// types themselves, which is the direction this actually goes in practice.
+///
+/// Nor does it make a downgrade lossless, and it is not meant to. A *field* added by a
+/// newer build is dropped by an older one and gone at its next save — the behaviour
+/// before this type existed, unchanged by it, and the price of an older build being able
+/// to read the payload at all. What the marker catches is the other kind of newer
+/// payload: one whose representation has changed, which an older build would otherwise
+/// read as plausible nonsense rather than refuse.
+struct StoredAccounts: Codable {
+    /// Bumped when the *representation* changes in a way tolerant decoding cannot absorb
+    /// — a field whose type or meaning changes, a key that is renamed — not a field that
+    /// is merely added.
+    ///
+    /// Bumping it obliges whoever does to give `init(from:)` a branch for every version
+    /// below the new one, because by the definition above a payload written before the
+    /// bump can no longer be read by the rules after it. There is no such branch today
+    /// and there should not be: one version has nothing to migrate from, and machinery
+    /// with no case to serve is machinery nobody has ever seen run.
+    ///
+    /// That obligation is pinned by a test rather than left here to be read, for the same
+    /// reason the required-key list is.
+    static let currentVersion = 1
+
+    /// What a payload carrying no marker is. Every device in the field holds one, and its
+    /// shape is exactly the shape version 1 describes.
+    static let preMarkerVersion = 1
+
+    var version: Int
+    var book: AccountBook
+
+    private enum CodingKeys: String, CodingKey { case version }
+
+    init(book: AccountBook, version: Int = StoredAccounts.currentVersion) {
+        self.version = version
+        self.book = book
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version =
+            try container.decodeIfPresent(Int.self, forKey: .version)
+            ?? StoredAccounts.preMarkerVersion
+
+        // Before the book is decoded, not after: a newer build's payload would otherwise
+        // fail somewhere inside and be reported as corruption, which is the one diagnosis
+        // that would have somebody replace accounts that are perfectly intact.
+        guard version <= StoredAccounts.currentVersion else {
+            throw AccountsFromNewerBuild(version: version)
+        }
+
+        book = try AccountBook(from: decoder)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        try book.encode(to: encoder)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+    }
+}
+
 /// Somewhere to keep the account book. A protocol so tests do not touch the keychain.
 ///
 /// `load` throws rather than answering with an empty book, because "there is nothing
@@ -61,7 +148,7 @@ public struct KeychainAccountStorage: AccountStorage {
         guard let stored else { return AccountBook() }
 
         do {
-            return try JSONDecoder().decode(AccountBook.self, from: stored)
+            return try JSONDecoder().decode(StoredAccounts.self, from: stored).book
         } catch {
             throw AccountStorageError.unreadable(error)
         }
@@ -70,7 +157,7 @@ public struct KeychainAccountStorage: AccountStorage {
     public func save(_ book: AccountBook) throws {
         // Not `try?`: an encode that fails and returns looks to the caller exactly like a
         // save that worked, which is the silence the warning above it exists to break.
-        try keychain.write(JSONEncoder().encode(book))
+        try keychain.write(JSONEncoder().encode(StoredAccounts(book: book)))
     }
 
     /// The statuses known to come right on their own, and so the only ones retried.
@@ -149,6 +236,16 @@ public final class AccountStore {
     private static func kind(ofReadFailure error: any Error) -> AccountStoreFailure.Kind {
         switch error {
         case AccountStorageError.transient(_): .transient
+        // Told apart from the rest of `unreadable` because the two are shown together and
+        // would otherwise contradict each other on the same screen: one says a reason
+        // that is not a locked device rarely clears on its own, and this one clears by
+        // updating. A remedy beside a denial that there is one is worse than either.
+        case AccountStorageError.unreadable(let underlying) where underlying is AccountsFromNewerBuild:
+            .savedByNewerBuild
+        // And unwrapped, from any storage that raises it directly. Falling through to
+        // `unreadable` would hand back the paragraph saying there is no remedy for a
+        // payload whose remedy is an update — which is the confusion above, restored.
+        case is AccountsFromNewerBuild: .savedByNewerBuild
         default: .unreadable
         }
     }
@@ -303,6 +400,10 @@ public struct AccountStoreFailure {
         /// The accounts could not be read, for any other reason. Nothing is retried
         /// behind the scenes, the status is shown, and asking again is left to the person.
         case unreadable
+        /// The payload was written by a newer build of imogen. Nothing is damaged, the
+        /// accounts are intact on the device, and the remedy is an update — which is the
+        /// opposite of what `unreadable` has to say, so it is not said as `unreadable`.
+        case savedByNewerBuild
         /// A change could not be written. The book already holds it; the device does not.
         case write(AccountChange)
     }
@@ -326,7 +427,7 @@ public struct AccountStoreFailure {
         case .transient:
             "imogen could not read your accounts on this device, and is not writing over "
                 + "them. They are not lost — but nothing you change is being kept."
-        case .unreadable:
+        case .unreadable, .savedByNewerBuild:
             "imogen could not read the accounts stored on this device, and is not writing "
                 + "over them. They are not lost — but nothing you change is being kept."
         case .write:
@@ -353,6 +454,12 @@ public struct AccountStoreFailure {
                 + "rather than replaced — so whatever can read them still can. Trying "
                 + "again costs nothing, though a reason that is not the device being "
                 + "locked rarely clears on its own."
+        // The one read failure with a remedy that is not "ask again", so it is the one
+        // that must not be given the paragraph saying there is no remedy.
+        case .savedByNewerBuild:
+            "The accounts already on this device are not shown, and are being left alone "
+                + "rather than replaced — nothing here is damaged. Updating imogen to the "
+                + "newest version should bring them back."
         case .write(let change):
             Self.consequence(of: change)
         }
