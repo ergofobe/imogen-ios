@@ -154,6 +154,10 @@ public actor UploadLedger {
         records(for: accountId)[localId]?.attempts ?? 0
     }
 
+    public func record(_ localId: String, for accountId: String) -> UploadRecord? {
+        records(for: accountId)[localId]
+    }
+
     /// Everything outstanding for one account, newest first.
     public func failures(for accountId: String) -> [UploadRecord] {
         records(for: accountId).values

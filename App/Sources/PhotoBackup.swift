@@ -310,7 +310,12 @@ final class PhotoBackup {
             PHAssetResourceManager.default().writeData(
                 for: resource, toFile: target, options: options
             ) { error in
-                continuation.resume(returning: error.map { .failure($0) } ?? .success(target))
+                guard let error else { return continuation.resume(returning: .success(target)) }
+                // A part-written export is bytes nothing will ever sweep up, and a file
+                // that is no longer given up on after three tries is one that would leave
+                // a fresh partial video in tmp on every pass.
+                try? FileManager.default.removeItem(at: target)
+                continuation.resume(returning: .failure(error))
             }
         }
     }

@@ -274,13 +274,8 @@ public func runBackupPass(
                 uploaded += 1
                 answered(account.id)
             case .failure(let error):
-                switch uploadDisposition(of: error) {
-                case .rejected:
-                    await recordProblem(
-                        localId, for: account.id, because: uploadFailureMessage(error),
-                        named: file.lastPathComponent, spendingAttempt: true, in: ledger
-                    )
-                    answered(account.id)
+                let disposition = uploadDisposition(of: error)
+                switch disposition {
                 case .unavailable:
                     // This server is having a bad day. Stop pushing at it — and only at
                     // it, because a dead second server must not hold up a healthy first.
@@ -289,11 +284,17 @@ public func runBackupPass(
                 case .cancelled:
                     await ledger.recordInterruption(localId, for: account.id)
                     cancelled = true
-                case .deferred:
-                    await deferFile(
+                case .rejected, .deferred:
+                    // `spendsAttempt` asked rather than restated: the rule #39 is about
+                    // must have one home, or changing it changes nothing here.
+                    await recordProblem(
                         localId, for: account.id, because: uploadFailureMessage(error),
-                        named: file.lastPathComponent, in: ledger
+                        named: file.lastPathComponent,
+                        spendingAttempt: disposition.spendsAttempt, in: ledger
                     )
+                    if disposition == .deferred {
+                        await ledger.recordInterruption(localId, for: account.id)
+                    }
                     answered(account.id)
                 }
             }
@@ -307,24 +308,24 @@ public func runBackupPass(
         if let file { await effects.dispose(file) }
 
         if let exportFailure {
-            // The same question as an upload failure, asked of the same classifier. An
-            // export cut short by an expiring window must not be read as the file's fault.
-            switch uploadDisposition(of: exportFailure) {
-            case .cancelled:
+            // The same question as an upload failure, asked of the same classifier — but
+            // only to tell a cut-short pass from the rest. Whatever went wrong getting the
+            // bytes off this device, it is not a destination's doing and must not take one
+            // down: the photo library's own failures are as transient as the network it
+            // reaches into for an asset that lives in iCloud.
+            if uploadDisposition(of: exportFailure) == .cancelled {
                 for account in wantedBy {
                     await ledger.recordInterruption(localId, for: account.id)
                 }
                 cancelled = true
-            case .unavailable:
-                message = "Couldn't reach the server. Backup will carry on later."
-                for account in wantedBy { drop(account.id) }
-            case .rejected, .deferred:
+            } else {
                 for account in wantedBy {
-                    await deferFile(
+                    await recordProblem(
                         localId, for: account.id,
                         because: uploadFailureMessage(exportFailure),
-                        named: localId, in: ledger
+                        named: nil, spendingAttempt: false, in: ledger
                     )
+                    await ledger.recordInterruption(localId, for: account.id)
                     answered(account.id)
                 }
             }
@@ -369,36 +370,23 @@ private func recordProblem(
     _ localId: String,
     for accountId: String,
     because message: String,
-    named name: String,
+    named name: String?,
     spendingAttempt: Bool,
     in ledger: UploadLedger
 ) async {
-    let attempts = await ledger.attempts(localId, for: accountId)
+    let existing = await ledger.record(localId, for: accountId)
     await ledger.put(
         UploadRecord(
             localId: localId,
-            attempts: spendingAttempt ? attempts + 1 : attempts,
+            attempts: spendingAttempt ? (existing?.attempts ?? 0) + 1 : existing?.attempts ?? 0,
             lastError: message,
             // Recorded rather than looked up later: a PHAsset since deleted off the phone
-            // still deserves to be nameable in a list of what went wrong.
-            displayName: name
+            // still deserves to be nameable in a list of what went wrong. A failure with no
+            // name of its own — nothing got as far as an export — keeps the one already
+            // there rather than replacing it with the opaque local identifier.
+            displayName: name ?? existing?.displayName
         ),
         for: accountId
     )
 }
 
-/// Said about the file, and moved out of the queue's way — but never counted against it.
-/// A local problem passes; a photograph abandoned over one does not come back.
-private func deferFile(
-    _ localId: String,
-    for accountId: String,
-    because message: String,
-    named name: String,
-    in ledger: UploadLedger
-) async {
-    await recordProblem(
-        localId, for: accountId, because: message, named: name,
-        spendingAttempt: false, in: ledger
-    )
-    await ledger.recordInterruption(localId, for: accountId)
-}

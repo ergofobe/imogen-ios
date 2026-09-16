@@ -478,19 +478,49 @@ final class BackupPassTests: XCTestCase {
         XCTAssertFalse(settled.contains("a"))
     }
 
-    func testANetworkFailureDuringAnExportIsTheNetworksProblem() async {
+    func testAnExportFailureNeverTakesADestinationDown() async {
         let ledger = self.ledger()
         let world = World()
+        // Exporting an iCloud original is a download, so it fails for network reasons —
+        // which is the photo library's business and not this server's. Blaming the server
+        // would stop the pass and leave the other 3,997 files untouched.
         world.exportFails = ["a": URLError(.notConnectedToInternet)]
 
         let outcome = await runBackupPass(
+            ["a", "b"], to: [account("one")], ledger: ledger, effects: world.effects()
+        )
+
+        XCTAssertEqual(world.uploads.map(\.localId), ["b"])
+        XCTAssertEqual(outcome.completedDestinations, ["one"])
+        XCTAssertNil(outcome.message)
+        let attempts = await ledger.attempts("a", for: "one")
+        XCTAssertEqual(attempts, 0)
+        // And it is moved out of the way rather than blocking the same queue position on
+        // every pass for ever.
+        let interruptions = await ledger.interruptions(for: "one")
+        XCTAssertEqual(interruptions["a"], 1)
+    }
+
+    func testAnExportFailureKeepsTheNameTheFileAlreadyHad() async {
+        let ledger = self.ledger()
+        await ledger.put(
+            UploadRecord(
+                localId: "a", attempts: 1, lastError: "no", displayName: "IMG_0421.HEIC"
+            ),
+            for: "one"
+        )
+        let world = World()
+        world.exportFails = ["a": Unreadable()]
+
+        _ = await runBackupPass(
             ["a"], to: [account("one")], ledger: ledger, effects: world.effects()
         )
 
-        let attempts = await ledger.attempts("a", for: "one")
-        XCTAssertEqual(attempts, 0)
-        XCTAssertTrue(outcome.completedDestinations.isEmpty)
-        XCTAssertNotNil(outcome.message)
+        // Nothing got as far as an export, so there is no filename to record — and the
+        // opaque local identifier is not an improvement on the one already there.
+        let listed = await ledger.failures(for: "one")
+        XCTAssertEqual(listed.first?.displayName, "IMG_0421.HEIC")
+        XCTAssertEqual(listed.first?.attempts, 1)
     }
 
     // MARK: - Stopping
