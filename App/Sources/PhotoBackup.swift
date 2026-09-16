@@ -41,12 +41,6 @@ struct RestingState: Equatable {
     var lastCompletedAt: Double?
 }
 
-struct BackupProgress: Equatable {
-    var completed: Int
-    var total: Int
-    var filename: String?
-}
-
 /// Copying the camera roll to every account that asked for it.
 ///
 /// One pass for all of them rather than one each: the expensive part is getting a
@@ -157,73 +151,34 @@ final class PhotoBackup {
             includeVideos: settings.includeVideos,
             cameraOnly: settings.cameraOnly
         )
-        guard !items.isEmpty else {
-            await recordCompleted(destinations)
-            return
-        }
+        let assets = Dictionary(
+            items.map { ($0.localIdentifier, $0) }, uniquingKeysWith: { first, _ in first }
+        )
 
-        var outstanding: [String: Set<String>] = [:]
-        for account in destinations {
-            outstanding[account.id] = await ledger.settled(for: account.id)
-        }
-
-        let total = destinations.reduce(0) { running, account in
-            running + items.filter { !(outstanding[account.id]?.contains($0.localIdentifier) ?? false) }.count
-        }
-        guard total > 0 else {
-            // Everything already there. Worth recording, because "up to date at 04:12" and
-            // "nothing has ever run" are the two states this screen most needs to separate.
-            await recordCompleted(destinations)
-            return
-        }
-
-        var completed = 0
-        progress = BackupProgress(completed: 0, total: total, filename: nil)
-        defer { progress = nil }
-
-        for item in items {
-            if Task.isCancelled { return }
-
-            // Fetched once, sent to each destination. This is the expensive step.
-            var file: URL?
-            for account in destinations {
-                if outstanding[account.id]?.contains(item.localIdentifier) == true { continue }
-
-                if file == nil {
-                    file = await export(item)
-                    guard file != nil else { break }
-                }
-                guard let file else { break }
-
-                progress = BackupProgress(
-                    completed: completed,
-                    total: total,
-                    filename: file.lastPathComponent
-                )
-
-                let outcome = await upload(file, item, to: model.session(for: account), account)
-                // Only what is dealt with. Counting a transient failure here is what let a
-                // pass in which nothing arrived report the same progress as one that worked.
-                if outcome != .unavailable { completed += 1 }
-                if outcome == .unavailable {
-                    // The server or the network is having a bad day. Stop pushing at it;
-                    // the next pass will pick up where this one left off.
-                    lastError = "Couldn't reach the server. Backup will carry on later."
-                    try? FileManager.default.removeItem(at: file)
-                    return
-                }
-            }
-            if let file { try? FileManager.default.removeItem(at: file) }
-        }
-
-        await recordCompleted(destinations)
-    }
-
-    private func recordCompleted(_ destinations: [Account]) async {
-        let now = Date().timeIntervalSince1970
-        for account in destinations {
-            await ledger.recordCompleted(at: now, for: account.id)
-        }
+        // The loop itself is in ImogenKit, where `swift test` can reach it. Everything
+        // that only exists on a phone — PhotoKit, the network, the clock — arrives here.
+        let outcome = await runBackupPass(
+            items.map(\.localIdentifier),
+            to: destinations,
+            ledger: ledger,
+            effects: BackupPassEffects(
+                export: { localId in
+                    guard let asset = assets[localId] else {
+                        return .failure(ExportFailure.noSuchAsset)
+                    }
+                    return await self.export(asset)
+                },
+                dispose: { url in try? FileManager.default.removeItem(at: url) },
+                upload: { file, localId, account in
+                    await self.send(
+                        file, localId, assets[localId], to: model.session(for: account)
+                    )
+                },
+                report: { self.progress = $0 },
+                isCancelled: { Task.isCancelled }
+            )
+        )
+        lastError = outcome.message
     }
 
     /// Refreshed after a pass rather than polled: the numbers only move when one runs.
@@ -239,58 +194,26 @@ final class PhotoBackup {
         resting = next
     }
 
-    private enum Outcome { case uploaded, rejected, unavailable }
-
-    private func upload(
-        _ file: URL, _ item: PHAsset, to session: Session, _ account: Account
-    ) async -> Outcome {
-        let localId = item.localIdentifier
+    /// One file to one destination, reduced to the remote asset id or the reason not.
+    /// What that reason costs is `uploadDisposition(of:)`'s to say, not this method's.
+    private func send(
+        _ file: URL, _ localId: String, _ asset: PHAsset?, to session: Session
+    ) async -> Result<String, Error> {
         do {
             let result = try await session.client.assets.upload(
                 file,
                 options: UploadOptions(
                     metadata: AssetUploadMetadata(
                         deviceAssetId: localId,
-                        capturedAt: isoInstant(item.creationDate ?? Date()),
+                        capturedAt: isoInstant(asset?.creationDate ?? Date()),
                         filename: file.lastPathComponent
                     )
                 )
             )
-            await ledger.put(
-                UploadRecord(localId: localId, assetId: result.asset.id),
-                for: account.id
-            )
-            return .uploaded
-        } catch let error as ImogenError {
-            // A rejection the server will keep making — a file type it will not take, a
-            // quota that is full — is recorded against this file. Anything transient is
-            // the server's problem, not this file's, and must not spend its attempts.
-            if error.isRetryable || error.status == 0 { return .unavailable }
-            await recordFailure(localId, account.id, error.message, file.lastPathComponent)
-            return .rejected
+            return .success(result.asset.id)
         } catch {
-            await recordFailure(
-                localId, account.id, error.localizedDescription, file.lastPathComponent
-            )
-            return .unavailable
+            return .failure(error)
         }
-    }
-
-    private func recordFailure(
-        _ localId: String, _ accountId: String, _ message: String, _ name: String
-    ) async {
-        let attempts = await ledger.attempts(localId, for: accountId)
-        await ledger.put(
-            UploadRecord(
-                localId: localId,
-                attempts: attempts + 1,
-                lastError: message,
-                // Recorded rather than looked up later: a PHAsset since deleted off the
-                // phone still deserves to be nameable in a list of what went wrong.
-                displayName: name
-            ),
-            for: accountId
-        )
     }
 
     /// Everything outstanding, across every destination.
@@ -359,14 +282,14 @@ final class PhotoBackup {
     /// file the camera wrote, EXIF and all, rather than something re-encoded on the way
     /// out. A photograph that arrives on the server without its capture date is a
     /// photograph in the wrong place in the timeline for ever.
-    private func export(_ asset: PHAsset) async -> URL? {
+    private func export(_ asset: PHAsset) async -> Result<URL, Error> {
         let resources = PHAssetResource.assetResources(for: asset)
         let preferred: [PHAssetResourceType] = [
             .photo, .video, .fullSizePhoto, .fullSizeVideo,
         ]
         guard let resource = preferred.compactMap({ type in
             resources.first { $0.type == type }
-        }).first else { return nil }
+        }).first else { return .failure(ExportFailure.noUsableResource) }
 
         let target = URL.temporaryDirectory
             .appending(path: "imogen-upload")
@@ -379,11 +302,20 @@ final class PhotoBackup {
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
 
+        // The reason is kept rather than collapsed to nil: `isNetworkAccessAllowed` means
+        // this can be a download from iCloud, so it fails for network reasons and for an
+        // expiring background window as readily as for a broken file, and only
+        // `uploadDisposition(of:)` may decide which of those costs the file anything.
         return await withCheckedContinuation { continuation in
             PHAssetResourceManager.default().writeData(
                 for: resource, toFile: target, options: options
             ) { error in
-                continuation.resume(returning: error == nil ? target : nil)
+                guard let error else { return continuation.resume(returning: .success(target)) }
+                // A part-written export is bytes nothing will ever sweep up, and a file
+                // that is no longer given up on after three tries is one that would leave
+                // a fresh partial video in tmp on every pass.
+                try? FileManager.default.removeItem(at: target)
+                continuation.resume(returning: .failure(error))
             }
         }
     }
