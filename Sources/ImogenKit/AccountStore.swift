@@ -26,6 +26,77 @@ public enum AccountStorageError: Error, LocalizedError {
     }
 }
 
+/// Accounts written by a build that knows something this one does not.
+///
+/// Its own error rather than a decoding failure, because the two call for opposite
+/// answers: nothing here is corrupt, the accounts are intact on the device, and the
+/// remedy is an update rather than the destruction of a payload that was fine all along.
+public struct AccountsFromNewerBuild: Error, LocalizedError, Equatable {
+    public let version: Int
+
+    public init(version: Int) { self.version = version }
+
+    public var errorDescription: String? {
+        "These accounts were saved by a newer version of imogen (format \(version); this "
+            + "one reads \(StoredAccounts.currentVersion)). They are still on the device — "
+            + "updating imogen should bring them back."
+    }
+}
+
+/// The account book as it is stored, with the marker that says which shape it is in.
+///
+/// The marker sits *beside* the book's own keys rather than wrapping them, which is the
+/// whole of why it is safe to start writing one now: a build released before the marker
+/// existed ignores a key it has never heard of, while a wrapper would have made every
+/// payload this release writes unreadable to the release before it — manufacturing the
+/// downgrade failure the marker exists to diagnose.
+///
+/// And that is all a marker can do. It labels; it decodes nothing. A payload written
+/// before a field existed is read by the tolerant decoders on the three types themselves,
+/// which is the direction this actually goes in practice.
+struct StoredAccounts: Codable {
+    /// Bumped when the *representation* changes in a way tolerant decoding cannot absorb
+    /// — a field whose type or meaning changes, a key that is renamed — not a field that
+    /// is merely added.
+    static let currentVersion = 1
+
+    /// What a payload carrying no marker is. Every device in the field holds one, and its
+    /// shape is exactly the shape version 1 describes.
+    static let preMarkerVersion = 1
+
+    var version: Int
+    var book: AccountBook
+
+    private enum CodingKeys: String, CodingKey { case version }
+
+    init(book: AccountBook, version: Int = StoredAccounts.currentVersion) {
+        self.version = version
+        self.book = book
+    }
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version =
+            try container.decodeIfPresent(Int.self, forKey: .version)
+            ?? StoredAccounts.preMarkerVersion
+
+        // Before the book is decoded, not after: a newer build's payload would otherwise
+        // fail somewhere inside and be reported as corruption, which is the one diagnosis
+        // that would have somebody replace accounts that are perfectly intact.
+        guard version <= StoredAccounts.currentVersion else {
+            throw AccountsFromNewerBuild(version: version)
+        }
+
+        book = try AccountBook(from: decoder)
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        try book.encode(to: encoder)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+    }
+}
+
 /// Somewhere to keep the account book. A protocol so tests do not touch the keychain.
 ///
 /// `load` throws rather than answering with an empty book, because "there is nothing
@@ -61,7 +132,7 @@ public struct KeychainAccountStorage: AccountStorage {
         guard let stored else { return AccountBook() }
 
         do {
-            return try JSONDecoder().decode(AccountBook.self, from: stored)
+            return try JSONDecoder().decode(StoredAccounts.self, from: stored).book
         } catch {
             throw AccountStorageError.unreadable(error)
         }
@@ -70,7 +141,7 @@ public struct KeychainAccountStorage: AccountStorage {
     public func save(_ book: AccountBook) throws {
         // Not `try?`: an encode that fails and returns looks to the caller exactly like a
         // save that worked, which is the silence the warning above it exists to break.
-        try keychain.write(JSONEncoder().encode(book))
+        try keychain.write(JSONEncoder().encode(StoredAccounts(book: book)))
     }
 
     /// The statuses known to come right on their own, and so the only ones retried.
