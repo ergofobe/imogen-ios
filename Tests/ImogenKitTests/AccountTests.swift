@@ -735,11 +735,47 @@ final class StoredAccountCodingTests: XCTestCase {
     /// The marker sits beside the book's keys rather than wrapping them precisely so that
     /// this holds: a build that predates the marker reads what this one writes. Wrapping
     /// would have manufactured the downgrade failure the marker exists to diagnose.
+    ///
+    /// Decoded with `PreMarkerBook` rather than with `AccountBook`: this branch's own
+    /// decoder is deliberately tolerant and would go on passing through a change that
+    /// broke the guarantee, which is the opposite of what a test is for.
     func testABuildThatPredatesTheMarkerCanStillReadWhatThisOneWrites() throws {
         let marked = try JSONEncoder().encode(StoredAccounts(book: furnishedBook()))
 
-        // The decoder such a build has is the book's own, reading the payload directly.
-        XCTAssertEqual(try JSONDecoder().decode(AccountBook.self, from: marked), furnishedBook())
+        let downgraded = try JSONDecoder().decode(PreMarkerBook.self, from: marked)
+
+        XCTAssertEqual(downgraded.activeAccountId, "a")
+        XCTAssertEqual(downgraded.accounts.map(\.id), ["a"])
+        XCTAssertEqual(downgraded.accounts[0].tokens.refreshToken, "refresh")
+        XCTAssertTrue(downgraded.accounts[0].backupEnabled)
+    }
+
+    /// The account book exactly as the release before the marker declares it: synthesized
+    /// `Codable`, every key required, nothing tolerated. Frozen on purpose — it is a
+    /// record of what is already installed on people's phones, so a field added to
+    /// `Account` tomorrow must *not* be added here.
+    private struct PreMarkerBook: Codable {
+        struct StoredAccount: Codable {
+            struct StoredTokens: Codable {
+                let accessToken: String
+                let refreshToken: String?
+                let obtainedAt: Double
+                let expiresIn: Int
+                let scope: String
+            }
+
+            let id: String
+            let serverURL: String
+            let userId: String
+            let email: String
+            let name: String
+            let clientId: String
+            let tokens: StoredTokens
+            let backupEnabled: Bool
+        }
+
+        let accounts: [StoredAccount]
+        let activeAccountId: String?
     }
 
     /// The case the marker is actually for. Nothing is corrupt, the accounts are intact,
@@ -761,6 +797,45 @@ final class StoredAccountCodingTests: XCTestCase {
             // The remedy has to be in it. "Unreadable" with no remedy is the diagnosis
             // that sends somebody to replace a payload that was fine all along.
             XCTAssertEqual(newer.errorDescription?.contains("updating imogen"), true)
+        }
+    }
+
+    /// What closes the gap the three tests above leave open between them: a new *optional*
+    /// field the fixture never sets is encoded as nothing at all, so it appears in no
+    /// payload, generates no variant, and round-trips equal while being silently dropped
+    /// on every reload. The type's own stored properties are the only place it shows.
+    func testTheFixtureWritesEveryPropertyTheseTypesStore() throws {
+        let written = Set(try leaves(of: StoredAccounts(book: furnishedBook())).keys)
+        let book = furnishedBook()
+
+        // Composite properties are skipped where their own leaves are checked instead.
+        assertEveryPropertyIsWritten(by: book, at: "", into: written, skipping: ["accounts"])
+        assertEveryPropertyIsWritten(
+            by: book.accounts[0], at: "accounts[]", into: written, skipping: ["tokens"]
+        )
+        assertEveryPropertyIsWritten(
+            by: book.accounts[0].tokens, at: "accounts[].tokens", into: written
+        )
+    }
+
+    private func assertEveryPropertyIsWritten(
+        by subject: Any,
+        at prefix: String,
+        into written: Set<String>,
+        skipping: Set<String> = [],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        for child in Mirror(reflecting: subject).children {
+            guard let label = child.label, !skipping.contains(label) else { continue }
+            let path = prefix.isEmpty ? label : "\(prefix).\(label)"
+            XCTAssertTrue(
+                written.contains(path),
+                "the fixture writes nothing at \(path), so nothing here can tell a decoder "
+                    + "that reads it from one that drops it. Give it a value in "
+                    + "`furnishedBook`, and leave `bareBook` at the default.",
+                file: file, line: line
+            )
         }
     }
 

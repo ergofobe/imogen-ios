@@ -120,6 +120,60 @@ final class KeychainTests: XCTestCase {
         }
     }
 
+    /// The marker only does anything if `save` actually writes it, and every test that
+    /// exercises it builds `StoredAccounts` by hand. Left as `encode(book)` the whole
+    /// suite stays green while the newer-build refusal can never fire on a real device.
+    func testTheStoreWritesTheMarkerAndReadsItsOwnPayloadBack() throws {
+        let account = "case-\(UUID().uuidString)"
+        let keychain = Keychain(service: "com.imogen.tests", account: account)
+        defer { keychain.delete() }
+        let storage = KeychainAccountStorage(service: "com.imogen.tests", account: account)
+        let book = AccountBook(
+            accounts: [
+                Account(
+                    id: "a", serverURL: "https://a.example.com", userId: "u",
+                    email: "u@example.com", name: "u", clientId: "c",
+                    tokens: TokenSet(
+                        accessToken: "at", refreshToken: "rt", obtainedAt: 1_700_000_000,
+                        expiresIn: 3_600, scope: "library:read"
+                    )
+                )
+            ],
+            activeAccountId: "a"
+        )
+
+        try storage.save(book)
+
+        let payload =
+            try JSONSerialization.jsonObject(with: XCTUnwrap(keychain.read())) as? [String: Any]
+        XCTAssertEqual(payload?["version"] as? Int, StoredAccounts.currentVersion)
+        XCTAssertEqual(try storage.load(), book)
+    }
+
+    /// A payload from a newer build is not corruption, and the screen that shows it must
+    /// not offer the remedy for corruption — which is to say, none at all.
+    @MainActor
+    func testAPayloadFromANewerBuildIsReportedAsOneRatherThanAsCorruption() throws {
+        let account = "case-\(UUID().uuidString)"
+        let keychain = Keychain(service: "com.imogen.tests", account: account)
+        defer { keychain.delete() }
+        let storage = KeychainAccountStorage(service: "com.imogen.tests", account: account)
+        try keychain.write(
+            Data(#"{"accounts":[],"version":\#(StoredAccounts.currentVersion + 1)}"#.utf8)
+        )
+
+        let store = AccountStore(storage: storage)
+
+        XCTAssertEqual(store.lastFailure?.kind, .savedByNewerBuild)
+        XCTAssertTrue(store.accountsUnreadable)
+        let failure = try XCTUnwrap(store.lastFailure)
+        XCTAssertTrue(failure.consequence.contains("Updating imogen"))
+        // The two remedies are rendered one above the other, so the paragraph denying
+        // there is one must not be the paragraph beside a reason that names one.
+        XCTAssertFalse(failure.consequence.contains("rarely clears on its own"))
+        XCTAssertTrue(failure.reason.contains("updating imogen"))
+    }
+
     func testADeviceWithNothingStoredLoadsAnEmptyBook() throws {
         let storage = KeychainAccountStorage(
             service: "com.imogen.tests", account: "case-\(UUID().uuidString)"

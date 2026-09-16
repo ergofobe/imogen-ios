@@ -36,9 +36,13 @@ public enum LinkError: Error, LocalizedError {
             // Nothing is lost, and saying so is the point: the authorization code in the
             // callback simply expires unspent, so starting again is a complete remedy
             // rather than a shrug.
+            // "Once it is unlocked", not "try again": a retry on a device still refusing
+            // reads is refused at the *write* that starts the next sign-in, and comes
+            // back as a bare keychain status with no remedy in it at all.
             "The sign-in you started could not be read back from this device, so it "
                 + "cannot be completed. A device that was still locked is the usual "
-                + "reason. Nothing has been lost — signing in again will work. "
+                + "reason. Nothing has been lost — once it is unlocked, signing in again "
+                + "will work. "
                 + ((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
         case .server(let message): message
         }

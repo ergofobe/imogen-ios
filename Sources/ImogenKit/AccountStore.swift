@@ -220,6 +220,12 @@ public final class AccountStore {
     private static func kind(ofReadFailure error: any Error) -> AccountStoreFailure.Kind {
         switch error {
         case AccountStorageError.transient(_): .transient
+        // Told apart from the rest of `unreadable` because the two are shown together and
+        // would otherwise contradict each other on the same screen: one says a reason
+        // that is not a locked device rarely clears on its own, and this one clears by
+        // updating. A remedy beside a denial that there is one is worse than either.
+        case AccountStorageError.unreadable(let underlying) where underlying is AccountsFromNewerBuild:
+            .savedByNewerBuild
         default: .unreadable
         }
     }
@@ -374,6 +380,10 @@ public struct AccountStoreFailure {
         /// The accounts could not be read, for any other reason. Nothing is retried
         /// behind the scenes, the status is shown, and asking again is left to the person.
         case unreadable
+        /// The payload was written by a newer build of imogen. Nothing is damaged, the
+        /// accounts are intact on the device, and the remedy is an update — which is the
+        /// opposite of what `unreadable` has to say, so it is not said as `unreadable`.
+        case savedByNewerBuild
         /// A change could not be written. The book already holds it; the device does not.
         case write(AccountChange)
     }
@@ -397,7 +407,7 @@ public struct AccountStoreFailure {
         case .transient:
             "imogen could not read your accounts on this device, and is not writing over "
                 + "them. They are not lost — but nothing you change is being kept."
-        case .unreadable:
+        case .unreadable, .savedByNewerBuild:
             "imogen could not read the accounts stored on this device, and is not writing "
                 + "over them. They are not lost — but nothing you change is being kept."
         case .write:
@@ -424,6 +434,12 @@ public struct AccountStoreFailure {
                 + "rather than replaced — so whatever can read them still can. Trying "
                 + "again costs nothing, though a reason that is not the device being "
                 + "locked rarely clears on its own."
+        // The one read failure with a remedy that is not "ask again", so it is the one
+        // that must not be given the paragraph saying there is no remedy.
+        case .savedByNewerBuild:
+            "The accounts already on this device are not shown, and are being left alone "
+                + "rather than replaced — nothing here is damaged. Updating imogen to the "
+                + "newest version should bring them back."
         case .write(let change):
             Self.consequence(of: change)
         }
