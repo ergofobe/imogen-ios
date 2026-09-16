@@ -47,19 +47,20 @@ final class BackupPassTests: XCTestCase {
     @MainActor
     private final class World {
         var answers: [String: Result<String, Error>] = [:]
-        var exportFails: Set<String> = []
+        var exportFails: [String: Error] = [:]
         var exported: [String] = []
         var disposed: [URL] = []
         var uploads: [(localId: String, accountId: String)] = []
         var progress: [BackupProgress?] = []
+        var lastCompletedReported: Int { progress.compactMap { $0 }.last?.completed ?? -1 }
         var cancelAfterUploads: Int?
 
         func effects() -> BackupPassEffects {
             BackupPassEffects(
                 export: { [unowned self] localId in
                     self.exported.append(localId)
-                    if self.exportFails.contains(localId) { return nil }
-                    return URL.temporaryDirectory.appending(path: "\(localId).jpg")
+                    if let error = self.exportFails[localId] { return .failure(error) }
+                    return .success(URL.temporaryDirectory.appending(path: "\(localId).jpg"))
                 },
                 dispose: { [unowned self] url in self.disposed.append(url) },
                 upload: { [unowned self] _, localId, account in
@@ -204,7 +205,7 @@ final class BackupPassTests: XCTestCase {
     func testAnAssetThatCannotBeExportedIsNotUploaded() async {
         let ledger = self.ledger()
         let world = World()
-        world.exportFails = ["a"]
+        world.exportFails = ["a": Unreadable()]
 
         _ = await runBackupPass(
             ["a", "b"], to: [account("one")], ledger: ledger, effects: world.effects()
@@ -214,11 +215,15 @@ final class BackupPassTests: XCTestCase {
         // Only "b" was ever written to disk, so only "b" is disposed of.
         XCTAssertEqual(world.disposed.count, 1)
 
-        // A file the device cannot read is this file's own problem, so it spends an
-        // attempt and is eventually folded away rather than exported on every pass for
-        // ever — and the destination cannot claim it reached everything.
+        // Said out loud on the failures screen, so it is not silently exported afresh by
+        // every pass for ever — but it costs the file nothing, because a local problem
+        // passes and an abandoned photograph does not come back.
         let attempts = await ledger.attempts("a", for: "one")
-        XCTAssertEqual(attempts, 1)
+        XCTAssertEqual(attempts, 0)
+        let listed = await ledger.failures(for: "one").map(\.localId)
+        XCTAssertEqual(listed, ["a"])
+        let interruptions = await ledger.interruptions(for: "one")
+        XCTAssertEqual(interruptions["a"], 1)
     }
 
     // MARK: - Being cut short
@@ -315,6 +320,37 @@ final class BackupPassTests: XCTestCase {
         XCTAssertEqual(world.uploads.map(\.localId), ["c", "b"])
     }
 
+    func testInterruptionsAreDroppedOnceNothingWillTryTheFileAgain() async {
+        let ledger = self.ledger()
+        await ledger.recordInterruption("a", for: "one")
+        await ledger.put(
+            UploadRecord(localId: "a", attempts: maxUploadAttempts, lastError: "no"),
+            for: "one"
+        )
+
+        let world = World()
+        _ = await runBackupPass(
+            ["a"], to: [account("one")], ledger: ledger, effects: world.effects()
+        )
+
+        // Read in full at the start of every pass, so a library that has given up on a few
+        // hundred assets must not carry them for the life of the install.
+        let left = await ledger.interruptions(for: "one")
+        XCTAssertTrue(left.isEmpty)
+    }
+
+    func testARetryPutsACutShortFileBackInItsPlace() async {
+        let ledger = self.ledger()
+        await ledger.recordInterruption("a", for: "one")
+
+        // A file that has only ever been cut short has an interruption and no record at
+        // all, so a retry guarded on the record would never reach it.
+        await ledger.retry("a", for: "one")
+
+        let left = await ledger.interruptions(for: "one")
+        XCTAssertTrue(left.isEmpty)
+    }
+
     func testGettingThroughPutsTheFileBackInItsPlace() async {
         let ledger = self.ledger()
         await ledger.recordInterruption("b", for: "one")
@@ -372,7 +408,7 @@ final class BackupPassTests: XCTestCase {
         XCTAssertNil(dead)
     }
 
-    func testARejectionKeepsTheDestinationFromClaimingCompletion() async {
+    func testARejectionStillLetsTheDestinationBeUpToDate() async {
         let ledger = self.ledger()
         let world = World()
         world.answers["a"] = .failure(permanent())
@@ -381,9 +417,80 @@ final class BackupPassTests: XCTestCase {
             ["a", "b"], to: [account("one")], ledger: ledger, effects: world.effects()
         )
 
+        // The pass did everything it could, and the failure is counted on the same screen
+        // as this timestamp. Withholding it instead freezes "last completed" for ever over
+        // one bad photograph, which is ergofobe/imogen-ios#37's third regression.
+        XCTAssertEqual(outcome.completedDestinations, ["one"])
+        let listed = await ledger.failures(for: "one").map(\.localId)
+        XCTAssertEqual(listed, ["a"])
+    }
+
+    func testProgressReachesTheEndWhenADestinationIsDropped() async {
+        let ledger = self.ledger()
+        let world = World()
+        world.answers["two/a"] = .failure(transient())
+
+        _ = await runBackupPass(
+            ["a", "b"], to: [account("one"), account("two")],
+            ledger: ledger, effects: world.effects()
+        )
+
+        // Four pairs were owed. Two went to the healthy server, one was refused and one
+        // was never tried — and a progress bar frozen at half way for the rest of a pass
+        // reads as a hang.
+        let reported = world.progress.compactMap { $0 }
+        XCTAssertEqual(reported.last?.total, 4)
+        XCTAssertEqual(world.lastCompletedReported, 4)
+    }
+
+    // MARK: - An export is as interruptible as an upload
+
+    func testAnExportCutShortCostsTheFileNothing() async {
+        let ledger = self.ledger()
+        let world = World()
+        // `isNetworkAccessAllowed` means an export of an iCloud asset is a download, so an
+        // expiring window lands here at least as often as in the upload — and this is the
+        // long part of a big video, which is the case #39 is about.
+        world.exportFails = ["a": CancellationError()]
+
+        let outcome = await runBackupPass(
+            ["a"], to: [account("one")], ledger: ledger, effects: world.effects()
+        )
+
+        let attempts = await ledger.attempts("a", for: "one")
+        XCTAssertEqual(attempts, 0)
+        XCTAssertNil(outcome.message)
+        let interruptions = await ledger.interruptions(for: "one")
+        XCTAssertEqual(interruptions["a"], 1)
+    }
+
+    func testAnExportCutShortNeverAbandonsTheFile() async {
+        let ledger = self.ledger()
+        for _ in 1...(maxUploadAttempts + 1) {
+            let world = World()
+            world.exportFails = ["a": URLError(.cancelled)]
+            _ = await runBackupPass(
+                ["a"], to: [account("one")], ledger: ledger, effects: world.effects()
+            )
+        }
+
+        let settled = await ledger.settled(for: "one")
+        XCTAssertFalse(settled.contains("a"))
+    }
+
+    func testANetworkFailureDuringAnExportIsTheNetworksProblem() async {
+        let ledger = self.ledger()
+        let world = World()
+        world.exportFails = ["a": URLError(.notConnectedToInternet)]
+
+        let outcome = await runBackupPass(
+            ["a"], to: [account("one")], ledger: ledger, effects: world.effects()
+        )
+
+        let attempts = await ledger.attempts("a", for: "one")
+        XCTAssertEqual(attempts, 0)
         XCTAssertTrue(outcome.completedDestinations.isEmpty)
-        let stamped = await ledger.lastCompleted(for: "one")
-        XCTAssertNil(stamped)
+        XCTAssertNotNil(outcome.message)
     }
 
     // MARK: - Stopping
@@ -493,11 +600,26 @@ final class CancellationShapeTests: XCTestCase {
         }
     }
 
-    func testAnythingElseIsTheFilesOwnProblem() {
-        struct Unreadable: Error {}
-        // Otherwise a file the device cannot read is exported afresh by every pass, for
-        // ever, and nothing on screen ever says so.
-        XCTAssertEqual(uploadDisposition(of: Unreadable()), .rejected)
-        XCTAssertTrue(uploadDisposition(of: Unreadable()).spendsAttempt)
+    func testALocalProblemCostsTheFileNothing() {
+        // The SDK throws plain Cocoa errors from `fileSize(of:)`, `Data(contentsOf:)` and
+        // `FileHandle`. A full disk is not a reason to give a photograph up for ever.
+        XCTAssertEqual(uploadDisposition(of: Unreadable()), .deferred)
+        XCTAssertFalse(uploadDisposition(of: Unreadable()).spendsAttempt)
+
+        let outOfSpace = CocoaError(.fileWriteOutOfSpace)
+        XCTAssertEqual(uploadDisposition(of: outOfSpace), .deferred)
+    }
+
+    func testOnlyAnAnswerFromTheServerSpendsAnAttempt() {
+        let refusal = ImogenError(status: 415, code: "unsupported", message: "No")
+        XCTAssertTrue(uploadDisposition(of: refusal).spendsAttempt)
+        for other: Error in [CancellationError(), URLError(.cancelled), URLError(.timedOut), Unreadable()] {
+            XCTAssertFalse(uploadDisposition(of: other).spendsAttempt)
+        }
     }
 }
+
+
+/// Stands in for the Cocoa and PhotoKit errors the SDK and the photo library actually
+/// throw, none of which is a `URLError` or an `ImogenError`.
+struct Unreadable: Error {}

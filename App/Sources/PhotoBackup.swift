@@ -163,7 +163,9 @@ final class PhotoBackup {
             ledger: ledger,
             effects: BackupPassEffects(
                 export: { localId in
-                    guard let asset = assets[localId] else { return nil }
+                    guard let asset = assets[localId] else {
+                        return .failure(ExportFailure.noSuchAsset)
+                    }
                     return await self.export(asset)
                 },
                 dispose: { url in try? FileManager.default.removeItem(at: url) },
@@ -280,14 +282,14 @@ final class PhotoBackup {
     /// file the camera wrote, EXIF and all, rather than something re-encoded on the way
     /// out. A photograph that arrives on the server without its capture date is a
     /// photograph in the wrong place in the timeline for ever.
-    private func export(_ asset: PHAsset) async -> URL? {
+    private func export(_ asset: PHAsset) async -> Result<URL, Error> {
         let resources = PHAssetResource.assetResources(for: asset)
         let preferred: [PHAssetResourceType] = [
             .photo, .video, .fullSizePhoto, .fullSizeVideo,
         ]
         guard let resource = preferred.compactMap({ type in
             resources.first { $0.type == type }
-        }).first else { return nil }
+        }).first else { return .failure(ExportFailure.noUsableResource) }
 
         let target = URL.temporaryDirectory
             .appending(path: "imogen-upload")
@@ -300,14 +302,25 @@ final class PhotoBackup {
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
 
+        // The reason is kept rather than collapsed to nil: `isNetworkAccessAllowed` means
+        // this can be a download from iCloud, so it fails for network reasons and for an
+        // expiring background window as readily as for a broken file, and only
+        // `uploadDisposition(of:)` may decide which of those costs the file anything.
         return await withCheckedContinuation { continuation in
             PHAssetResourceManager.default().writeData(
                 for: resource, toFile: target, options: options
             ) { error in
-                continuation.resume(returning: error == nil ? target : nil)
+                continuation.resume(returning: error.map { .failure($0) } ?? .success(target))
             }
         }
     }
+}
+
+/// Why the photo library would not hand a file over. PhotoKit's own errors come back
+/// unwrapped; these are the two cases it never gets as far as raising.
+enum ExportFailure: Error {
+    case noSuchAsset
+    case noUsableResource
 }
 
 /// The background task handler is registered before any view exists and is handed a bare

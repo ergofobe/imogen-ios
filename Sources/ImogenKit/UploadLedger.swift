@@ -194,8 +194,10 @@ public actor UploadLedger {
     /// reason goes with it rather than staying to describe a failure that is no longer the
     /// current answer.
     public func retry(_ localId: String, for accountId: String) {
-        guard let existing = records(for: accountId)[localId], !existing.isDone else { return }
+        // Before the guard: a file that has only ever been cut short mid-upload has an
+        // interruption and no record, so a guard on the record would never reach this.
         clearInterruption(localId, for: accountId)
+        guard let existing = records(for: accountId)[localId], !existing.isDone else { return }
         put(
             UploadRecord(
                 localId: existing.localId,
@@ -250,11 +252,21 @@ public actor UploadLedger {
     }
 
     /// The file got through, or somebody asked for it to be tried properly. Either way it
-    /// goes back to its place in the queue.
+    /// goes back to its place in the queue. Safe on a file that has none.
     public func clearInterruption(_ localId: String, for accountId: String) {
         var current = interruptions(for: accountId)
         guard current.removeValue(forKey: localId) != nil else { return }
         writeInterruptions(current, for: accountId)
+    }
+
+    /// Queue positions for files nothing will try again. Pruned rather than left, because
+    /// this file is decoded in full at the start of every pass and a library that has given
+    /// up on a few hundred assets would carry them for the life of the install.
+    public func pruneInterruptions(settled: Set<String>, for accountId: String) {
+        let current = interruptions(for: accountId)
+        let kept = current.filter { !settled.contains($0.key) }
+        guard kept.count != current.count else { return }
+        writeInterruptions(kept, for: accountId)
     }
 
     public func recordCompleted(at moment: Double, for accountId: String) {
