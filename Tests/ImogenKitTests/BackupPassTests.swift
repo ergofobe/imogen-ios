@@ -54,11 +54,16 @@ final class BackupPassTests: XCTestCase {
         var progress: [BackupProgress?] = []
         var lastCompletedReported: Int { progress.compactMap { $0 }.last?.completed ?? -1 }
         var cancelAfterUploads: Int?
+        /// The clock running out during the export of this file, which is where a window
+        /// expires on a big video.
+        var cancelDuringExportOf: String?
+        private var clockRanOut = false
 
         func effects() -> BackupPassEffects {
             BackupPassEffects(
                 export: { [unowned self] localId in
                     self.exported.append(localId)
+                    if localId == self.cancelDuringExportOf { self.clockRanOut = true }
                     if let error = self.exportFails[localId] { return .failure(error) }
                     return .success(URL.temporaryDirectory.appending(path: "\(localId).jpg"))
                 },
@@ -71,6 +76,7 @@ final class BackupPassTests: XCTestCase {
                 },
                 report: { [unowned self] value in self.progress.append(value) },
                 isCancelled: { [unowned self] in
+                    if self.clockRanOut { return true }
                     guard let limit = self.cancelAfterUploads else { return false }
                     return self.uploads.count >= limit
                 }
@@ -365,6 +371,70 @@ final class BackupPassTests: XCTestCase {
         XCTAssertTrue(left.isEmpty)
     }
 
+    func testAnExportCutShortByTheClockIsNotTheFilesBadLuck() async {
+        let ledger = self.ledger()
+        let world = World()
+        world.cancelDuringExportOf = "a"
+        // PhotoKit answers a `writeData` it cannot finish with an `NSError` of its own,
+        // never a `CancellationError` — so the error alone cannot tell the clock running
+        // out from the file being bad, and the expiring window #39 is about is exactly the
+        // case that arrives this way.
+        world.exportFails = ["a": Unreadable()]
+
+        let outcome = await runBackupPass(
+            ["a"], to: [account("one")], ledger: ledger, effects: world.effects()
+        )
+
+        let attempts = await ledger.attempts("a", for: "one")
+        XCTAssertEqual(attempts, 0)
+        XCTAssertNil(outcome.message)
+        XCTAssertTrue(outcome.completedDestinations.isEmpty)
+        // Recorded as a queue position, not as a failure: nothing went wrong.
+        let listed = await ledger.failures(for: "one")
+        XCTAssertTrue(listed.isEmpty)
+        let interruptions = await ledger.interruptions(for: "one")
+        XCTAssertEqual(interruptions["a"], 1)
+    }
+
+    func testAnAssetWithNothingToSendIsEventuallyFoldedAway() async {
+        let ledger = self.ledger()
+        for _ in 1...maxUploadAttempts {
+            let world = World()
+            world.exportFails = ["a": ExportFailure.noUsableResource]
+            _ = await runBackupPass(
+                ["a"], to: [account("one")], ledger: ledger, effects: world.effects()
+            )
+        }
+
+        // The photo library's "there is nothing here" does not change with the weather, so
+        // it is the one local failure that counts against the file — otherwise it is
+        // re-exported on every pass for the life of the install.
+        let settled = await ledger.settled(for: "one")
+        XCTAssertTrue(settled.contains("a"))
+        let listed = await ledger.failures(for: "one")
+        XCTAssertEqual(listed.first?.failureState, .givenUp)
+    }
+
+    func testAStaleTokenDoesNotGiveUpTheCameraRoll() async {
+        let ledger = self.ledger()
+        let unauthorised = ImogenError(status: 401, code: "unauthorized", message: "No")
+
+        for _ in 1...(maxUploadAttempts + 1) {
+            let world = World()
+            world.answers["a"] = .failure(unauthorised)
+            world.answers["b"] = .failure(unauthorised)
+            _ = await runBackupPass(
+                ["a", "b"], to: [account("one")], ledger: ledger, effects: world.effects()
+            )
+        }
+
+        // Uploads are sent unreplayable, so the SDK's refresh-and-retry cannot fire and
+        // the 401 arrives here. Spending an attempt on it gives up every photograph on the
+        // device in three passes, without the user touching anything.
+        let settled = await ledger.settled(for: "one")
+        XCTAssertTrue(settled.isEmpty)
+    }
+
     // MARK: - One destination's bad day is not another's
 
     func testAnUnreachableDestinationDoesNotStopAHealthyOne() async {
@@ -640,11 +710,25 @@ final class CancellationShapeTests: XCTestCase {
         XCTAssertEqual(uploadDisposition(of: outOfSpace), .deferred)
     }
 
-    func testOnlyAnAnswerFromTheServerSpendsAnAttempt() {
+    func testOnlyASettledAnswerSpendsAnAttempt() {
         let refusal = ImogenError(status: 415, code: "unsupported", message: "No")
         XCTAssertTrue(uploadDisposition(of: refusal).spendsAttempt)
-        for other: Error in [CancellationError(), URLError(.cancelled), URLError(.timedOut), Unreadable()] {
-            XCTAssertFalse(uploadDisposition(of: other).spendsAttempt)
+        XCTAssertTrue(uploadDisposition(of: ExportFailure.noUsableResource).spendsAttempt)
+
+        let transientOnes: [Error] = [
+            CancellationError(), URLError(.cancelled), URLError(.timedOut), Unreadable(),
+            ImogenError(status: 401, code: "unauthorized", message: "No"),
+            ImogenError(status: 403, code: "forbidden", message: "No"),
+        ]
+        for error in transientOnes {
+            XCTAssertFalse(uploadDisposition(of: error).spendsAttempt, "\(error)")
+        }
+    }
+
+    func testAStaleTokenIsTheSessionsProblem() {
+        for status in [401, 403] {
+            let error = ImogenError(status: status, code: "unauthorized", message: "No")
+            XCTAssertEqual(uploadDisposition(of: error), .unavailable)
         }
     }
 }

@@ -321,13 +321,6 @@ final class PhotoBackup {
     }
 }
 
-/// Why the photo library would not hand a file over. PhotoKit's own errors come back
-/// unwrapped; these are the two cases it never gets as far as raising.
-enum ExportFailure: Error {
-    case noSuchAsset
-    case noUsableResource
-}
-
 /// The background task handler is registered before any view exists and is handed a bare
 /// identifier, so it needs somewhere to find the model. One reference, set at launch.
 @MainActor

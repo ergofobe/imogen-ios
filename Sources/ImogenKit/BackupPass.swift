@@ -43,6 +43,23 @@ public enum UploadDisposition: Equatable, Sendable {
     public var spendsAttempt: Bool { self == .rejected }
 }
 
+/// The photo library had nothing to give. Unlike everything else that can go wrong
+/// locally, this answer does not change with the weather, so it is the one local failure
+/// that counts against the file.
+public enum ExportFailure: Error, LocalizedError, Equatable, Sendable {
+    /// The asset is no longer in the library.
+    case noSuchAsset
+    /// The asset carries no photograph or video resource to send.
+    case noUsableResource
+
+    public var errorDescription: String? {
+        switch self {
+        case .noSuchAsset: return "This photograph is no longer on the device."
+        case .noUsableResource: return "This device would not hand over the file."
+        }
+    }
+}
+
 /// What one failure means for the file, for the destination, and for the pass.
 ///
 /// Cancellation arrives in two shapes and both reach here. `URLSession` answers a
@@ -52,8 +69,8 @@ public enum UploadDisposition: Equatable, Sendable {
 /// resumable route, whose chunks *are* replayable — so the SDK reaches its backoff, and
 /// `Task.sleep` on a cancelled task throws `CancellationError`.
 ///
-/// Everything that is neither the network nor an answer from the server is `.deferred`
-/// rather than the file's fault. The SDK throws plain Cocoa errors from `fileSize(of:)`,
+/// Everything that is neither the network nor a settled answer is `.deferred` rather than
+/// the file's fault. The SDK throws plain Cocoa errors from `fileSize(of:)`,
 /// `Data(contentsOf:)` and `FileHandle`, and the photo library throws its own while
 /// fetching an asset that lives in iCloud — all of them conditions that pass.
 public func uploadDisposition(of error: Error) -> UploadDisposition {
@@ -61,7 +78,12 @@ public func uploadDisposition(of error: Error) -> UploadDisposition {
     if let url = error as? URLError {
         return url.code == .cancelled ? .cancelled : .unavailable
     }
+    if error is ExportFailure { return .rejected }
     guard let imogen = error as? ImogenError else { return .deferred }
+    // A stale token is the session's problem, not the photograph's. Uploads are sent
+    // unreplayable, so the SDK's refresh-and-retry cannot fire and the 401 arrives here —
+    // and spending an attempt on it would give up the whole camera roll in three passes.
+    if imogen.isAuthError { return .unavailable }
     // Status 0 is the SDK's "the request never reached a server".
     return imogen.isRetryable || imogen.status == 0 ? .unavailable : .rejected
 }
@@ -308,12 +330,17 @@ public func runBackupPass(
         if let file { await effects.dispose(file) }
 
         if let exportFailure {
-            // The same question as an upload failure, asked of the same classifier — but
-            // only to tell a cut-short pass from the rest. Whatever went wrong getting the
-            // bytes off this device, it is not a destination's doing and must not take one
-            // down: the photo library's own failures are as transient as the network it
-            // reaches into for an asset that lives in iCloud.
-            if uploadDisposition(of: exportFailure) == .cancelled {
+            // Asked of the same classifier, but only to tell a cut-short pass from the
+            // rest: whatever went wrong getting the bytes off this device, it is not a
+            // destination's doing and must not take one down. The photo library's failures
+            // are as transient as the network it reaches into for an asset in iCloud.
+            //
+            // `isCancelled` as well as the error, because PhotoKit answers a
+            // `writeData` it cannot finish with an `NSError` of its own — never a
+            // `CancellationError` — so the expiring window that #39 is about would
+            // otherwise be read as the file's bad luck rather than the clock's.
+            let disposition = uploadDisposition(of: exportFailure)
+            if disposition == .cancelled || effects.isCancelled() {
                 for account in wantedBy {
                     await ledger.recordInterruption(localId, for: account.id)
                 }
@@ -323,7 +350,7 @@ public func runBackupPass(
                     await recordProblem(
                         localId, for: account.id,
                         because: uploadFailureMessage(exportFailure),
-                        named: nil, spendingAttempt: false, in: ledger
+                        named: nil, spendingAttempt: disposition.spendsAttempt, in: ledger
                     )
                     await ledger.recordInterruption(localId, for: account.id)
                     answered(account.id)
