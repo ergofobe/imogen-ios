@@ -19,12 +19,27 @@ public let mobileScopes = [
 public enum LinkError: Error, LocalizedError {
     case notAnInvitation
     case noPendingSignIn
+    /// The record of the sign-in in progress could not be read back.
+    ///
+    /// Not `noPendingSignIn`: "nothing was waiting" sends somebody off to start a sign-in
+    /// that was already there, and says nothing about the device that refused. The two
+    /// end the same flow and are not the same news — the distinction #44 drew for the
+    /// account book, applied to the one record it deliberately left alone.
+    case pendingSignInUnreadable(any Error)
     case server(String)
 
     public var errorDescription: String? {
         switch self {
         case .notAnInvitation: "That is not an imogen pairing code."
         case .noPendingSignIn: "There is no sign-in waiting for this callback."
+        case .pendingSignInUnreadable(let error):
+            // Nothing is lost, and saying so is the point: the authorization code in the
+            // callback simply expires unspent, so starting again is a complete remedy
+            // rather than a shrug.
+            "The sign-in you started could not be read back from this device, so it "
+                + "cannot be completed. A device that was still locked is the usual "
+                + "reason. Nothing has been lost — signing in again will work. "
+                + ((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)
         case .server(let message): message
         }
     }
@@ -39,14 +54,21 @@ public enum LinkError: Error, LocalizedError {
 public struct AccountLinker: Sendable {
     private let clientName: String
     private let deviceName: String
-    private let pendingStore: Keychain
+    private let pendingStore: any SecretStorage
 
-    public init(clientName: String, deviceName: String) {
+    /// The keychain rather than user defaults: this holds a PKCE verifier, and a verifier
+    /// is the only thing standing between an intercepted code and a token. Injectable so
+    /// a test can refuse the read, which is the failure this record used to hide.
+    public init(
+        clientName: String,
+        deviceName: String,
+        pendingStore: any SecretStorage = Keychain(
+            service: "com.imogen.ios", account: "pending-auth"
+        )
+    ) {
         self.clientName = clientName
         self.deviceName = deviceName
-        // The keychain rather than user defaults: this holds a PKCE verifier, and a
-        // verifier is the only thing standing between an intercepted code and a token.
-        self.pendingStore = Keychain(service: "com.imogen.ios", account: "pending-auth")
+        self.pendingStore = pendingStore
     }
 
     public func invitation(from scanned: String) -> PairingInvitation? {
@@ -120,7 +142,7 @@ public struct AccountLinker: Sendable {
 
     /// Completes the browser flow from the callback the operating system delivered.
     public func completeBrowserSignIn(callback: String) async throws -> Account {
-        guard let pending = recall() else { throw LinkError.noPendingSignIn }
+        let pending = try recall()
 
         let oauth = OAuthClient(baseURL: pending.serverURL)
         let stored = try await oauth.completeAuthorization(
@@ -174,12 +196,31 @@ public struct AccountLinker: Sendable {
         try pendingStore.write(data)
     }
 
-    private func recall() -> Pending? {
-        // A refused read is still "no sign-in waiting" here, as it has always been: this
-        // record is rewritten by the next sign-in attempt, so nothing is lost by missing
-        // it. The account book is the one that cannot afford the same treatment.
-        guard let data = (try? pendingStore.read()) ?? nil else { return nil }
-        return try? JSONDecoder().decode(Pending.self, from: data)
+    /// The sign-in that is waiting, or a refusal that says which kind it is.
+    ///
+    /// The browser can come back while the device is locked, or during the keybag race at
+    /// launch — and the callback arrives exactly then, because that is when the app is
+    /// woken. Flattening that into "nothing was waiting" left the code unspent and the
+    /// person with no idea why.
+    private func recall() throws -> Pending {
+        let stored: Data?
+        do {
+            stored = try pendingStore.read()
+        } catch {
+            throw LinkError.pendingSignInUnreadable(error)
+        }
+        // Only "there is nothing stored" is an absent sign-in. `Keychain.read` throws
+        // every other refusal rather than flattening it to nil, which is what makes this
+        // distinction available here at all.
+        guard let stored else { throw LinkError.noPendingSignIn }
+
+        do {
+            return try JSONDecoder().decode(Pending.self, from: stored)
+        } catch {
+            // A record this build cannot decode is the same dead end as one it could not
+            // read, and the same remedy: start again, and the next attempt overwrites it.
+            throw LinkError.pendingSignInUnreadable(error)
+        }
     }
 
     /// Not private, so its encoding can be tested: it is written before the browser opens
