@@ -51,9 +51,16 @@ public struct AccountsFromNewerBuild: Error, LocalizedError, Equatable {
 /// payload this release writes unreadable to the release before it — manufacturing the
 /// downgrade failure the marker exists to diagnose.
 ///
-/// And that is all a marker can do. It labels; it decodes nothing. A payload written
-/// before a field existed is read by the tolerant decoders on the three types themselves,
-/// which is the direction this actually goes in practice.
+/// And that is all a marker can do, in one direction only. It labels; it decodes nothing.
+/// A payload written before a field existed is read by the tolerant decoders on the three
+/// types themselves, which is the direction this actually goes in practice.
+///
+/// Nor does it make a downgrade lossless, and it is not meant to. A *field* added by a
+/// newer build is dropped by an older one and gone at its next save — the behaviour
+/// before this type existed, unchanged by it, and the price of an older build being able
+/// to read the payload at all. What the marker catches is the other kind of newer
+/// payload: one whose representation has changed, which an older build would otherwise
+/// read as plausible nonsense rather than refuse.
 struct StoredAccounts: Codable {
     /// Bumped when the *representation* changes in a way tolerant decoding cannot absorb
     /// — a field whose type or meaning changes, a key that is renamed — not a field that
@@ -64,6 +71,9 @@ struct StoredAccounts: Codable {
     /// bump can no longer be read by the rules after it. There is no such branch today
     /// and there should not be: one version has nothing to migrate from, and machinery
     /// with no case to serve is machinery nobody has ever seen run.
+    ///
+    /// That obligation is pinned by a test rather than left here to be read, for the same
+    /// reason the required-key list is.
     static let currentVersion = 1
 
     /// What a payload carrying no marker is. Every device in the field holds one, and its

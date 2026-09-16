@@ -57,8 +57,16 @@ public enum LinkError: Error, LocalizedError {
         guard let keychain = error as? KeychainError else {
             return "The record of it was there but could not be understood."
         }
-        return "A device that was still locked is the usual reason. "
-            + (keychain.errorDescription ?? "")
+        let detail = keychain.errorDescription ?? ""
+        // Only the statuses that actually mean a locked device get told they do. A
+        // permanent refusal — a stored item that is not data, a decode failure in
+        // Security itself — would otherwise send somebody to unlock a device that is
+        // already unlocked. The remedy below still holds for it: the next attempt
+        // replaces the record rather than reading this one.
+        guard KeychainAccountStorage.isTransient(keychain.status) else {
+            return "The device would not give it back. \(detail)"
+        }
+        return "A device that was still locked is the usual reason. \(detail)"
     }
 }
 

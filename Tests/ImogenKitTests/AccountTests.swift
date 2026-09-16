@@ -338,7 +338,24 @@ private final class UnreadableStorage: AccountStorage, @unchecked Sendable {
     }
 }
 
+/// Storage that raises the newer-build refusal without wrapping it, which is what any
+/// store that is not the keychain one would do.
+private struct FromTheFutureStorage: AccountStorage {
+    func load() throws -> AccountBook { throw AccountsFromNewerBuild(version: 99) }
+    func save(_ book: AccountBook) throws {}
+}
+
 final class AccountLoadFailureTests: XCTestCase {
+
+    /// Wrapped or not, it is the same news and must not fall through to the paragraph
+    /// that says there is no remedy for a payload whose remedy is an update.
+    @MainActor
+    func testTheNewerBuildRefusalIsRecognisedUnwrappedToo() throws {
+        let store = AccountStore(storage: FromTheFutureStorage())
+
+        XCTAssertEqual(store.lastFailure?.kind, .savedByNewerBuild)
+        XCTAssertTrue(store.accountsUnreadable)
+    }
 
     @MainActor
     private func store(_ storage: AccountStorage) -> AccountStore {
@@ -837,6 +854,27 @@ final class StoredAccountCodingTests: XCTestCase {
                 file: file, line: line
             )
         }
+    }
+
+    /// The version cannot be bumped without somebody reading what bumping obliges.
+    ///
+    /// By `currentVersion`'s own definition a bump means tolerant decoding can no longer
+    /// absorb the change — so every payload already in the field needs a branch that
+    /// reads it by the old rules, and without one it flows into the new rules and comes
+    /// back as plausible nonsense. The doc comment says so; this is what makes somebody
+    /// read it. `preMarkerVersion` is pinned in the same breath because bumping both is
+    /// the easy mistake, and it would relabel every unmarked payload in the field.
+    func testTheVersionCannotBeBumpedWithoutReadingWhatABumpObliges() {
+        XCTAssertEqual(
+            StoredAccounts.currentVersion, 1,
+            "give `StoredAccounts.init(from:)` a branch that decodes every version below "
+                + "this one by the rules it was written under, then update this test"
+        )
+        XCTAssertEqual(
+            StoredAccounts.preMarkerVersion, 1,
+            "a payload with no marker is version 1 for ever — it is what is already on "
+                + "people's phones, and it does not move when `currentVersion` does"
+        )
     }
 
     // MARK: - Walking a real payload
