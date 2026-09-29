@@ -218,6 +218,22 @@ final class AccountStoreFailureTests: XCTestCase {
         XCTAssertEqual(store.lastFailure?.kind, .write(.refreshedTokens))
     }
 
+    /// The removeAccount copy promises the tokens will still work on relaunch. That is only
+    /// true because `AppModel.signOut` waits for the write before revoking — see #35. Pin
+    /// the words here so a wording tweak cannot quietly restore the lie that PR fixed.
+    @MainActor
+    func testAFailedSignOutSaysTheAccountComesBackNeedingSignOutNotSignIn() {
+        let store = AccountStore(storage: RefusingStorage(AccountBook(accounts: [account("a")])))
+
+        store.remove("a")
+
+        XCTAssertEqual(
+            store.lastFailure?.consequence,
+            "Signing out is not saved. The account will be back when imogen starts again, "
+                + "and will have to be signed out again."
+        )
+    }
+
     /// Every consequence is about the next launch, which is when the divergence shows.
     @MainActor
     func testTheConsequenceSaysWhatTheNextLaunchWillLookLike() {
