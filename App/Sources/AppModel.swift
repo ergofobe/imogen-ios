@@ -65,19 +65,35 @@ final class AppModel {
     }
 
     func signOut(_ account: Account) {
-        // The grant is revoked server-side first: an account removed from the phone but
-        // left live on the server is a token nobody can see and nobody can stop.
+        // Persist the removal first, and only then destroy the grant. Revoking before the
+        // write lands is what #35 was: a failed save brought the account back with tokens
+        // the server had already killed, so the banner that promised "sign out again" was
+        // lying — what was needed was a fresh sign-in. A write that fails must leave the
+        // tokens usable, which is what that copy already says.
         let serverURL = account.serverURL
         let tokens = account.tokens
+        let accountId = account.id
+
+        guard accounts.remove(accountId) else {
+            // Sealed store: nothing changed in the book or on disk. Leave the grant alone.
+            return
+        }
+        sessions[accountId] = nil
+
+        // `remove` advances the in-memory book whether or not the keychain took the write.
+        // `lastFailure` is how the store says which of those happened — nil only when the
+        // save landed (and cleared whatever was there before).
+        guard accounts.lastFailure == nil else {
+            Task { await ThumbnailCache.shared.forget(accountId: accountId) }
+            return
+        }
+
         Task.detached {
             let oauth = OAuthClient(baseURL: serverURL)
             try? await oauth.revoke(tokens.accessToken)
             if let refresh = tokens.refreshToken { try? await oauth.revoke(refresh) }
-            await ThumbnailCache.shared.forget(accountId: account.id)
+            await ThumbnailCache.shared.forget(accountId: accountId)
         }
-
-        sessions[account.id] = nil
-        accounts.remove(account.id)
     }
 
     func setBackupEnabled(_ account: Account, _ enabled: Bool) {
