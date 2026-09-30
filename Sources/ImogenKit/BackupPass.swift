@@ -34,9 +34,14 @@ public enum UploadDisposition: Equatable, Sendable {
     case cancelled
 
     /// Something that is not this file's settled answer and not a destination outage —
-    /// a local read problem, or a session that will not authorise the upload. Costs the
-    /// file nothing and the destination nothing; it only moves the file out of the queue's way.
+    /// a local read problem. Costs the file nothing and the destination nothing; it
+    /// only moves the file out of the queue's way.
     case deferred
+
+    /// The session will not authorise this destination. A 401 that reaches the pass
+    /// is a refresh that came back empty; a 403 is never refreshed. This destination
+    /// is done for the pass. The file's attempts are not.
+    case unauthorized
 
     /// Whether this costs the file one of its `maxUploadAttempts`, after which
     /// `settled(for:)` folds it away and no later pass tries it again.
@@ -73,18 +78,20 @@ public enum ExportFailure: Error, LocalizedError, Equatable, Sendable {
 /// the file's fault. The SDK throws plain Cocoa errors from `fileSize(of:)`,
 /// `Data(contentsOf:)` and `FileHandle`, and the photo library throws its own while
 /// fetching an asset that lives in iCloud — all of them conditions that pass.
+///
+/// A body that will not decode, or a value that will not encode, is not one of those.
+/// The upload may already have landed, and leaving it `.deferred` re-exports it forever.
 public func uploadDisposition(of error: Error) -> UploadDisposition {
     if error is CancellationError { return .cancelled }
     if let url = error as? URLError {
         return url.code == .cancelled ? .cancelled : .unavailable
     }
     if error is ExportFailure { return .rejected }
+    if error is DecodingError || error is EncodingError { return .rejected }
     guard let imogen = error as? ImogenError else { return .deferred }
-    // A stale token is the session's problem, not the photograph's — and not a destination
-    // outage either. Uploads are sent unreplayable, so the SDK's refresh-and-retry cannot
-    // fire and the 401 arrives here. Deferred so the pass keeps walking, the failures
-    // screen can say so, and three of them do not give up the camera roll.
-    if imogen.isAuthError { return .deferred }
+    // A 401 that arrives here is a refresh that came back empty. A 403 is never
+    // refreshed. Neither is this file's fault, and neither is the server being down.
+    if imogen.isAuthError { return .unauthorized }
     // Status 0 is the SDK's "the request never reached a server".
     return imogen.isRetryable || imogen.status == 0 ? .unavailable : .rejected
 }
@@ -161,8 +168,7 @@ public struct BackupPassOutcome: Equatable, Sendable {
     /// How many files actually arrived somewhere.
     public var uploaded: Int
 
-    /// Destinations that received everything this pass set out to send them, and so have
-    /// their "last completed" stamped.
+    /// Destinations whose "last completed" this pass stamps. Nothing arriving does not.
     public var completedDestinations: [String]
 
     /// What to put on screen, and nil when nothing needs saying.
@@ -192,18 +198,17 @@ public func runBackupPass(
     effects: BackupPassEffects
 ) async -> BackupPassOutcome {
     var outstanding: [String: Set<String>] = [:]
-    var interruptions: [String: Int] = [:]
+    var interruptions: [String: [String: Int]] = [:]
     for account in destinations {
         let settled = await ledger.settled(for: account.id)
         outstanding[account.id] = settled
-        // Nothing will try these again, so their queue position is dead weight in a file
-        // that is read in full at the start of every pass.
-        await ledger.pruneInterruptions(settled: settled, for: account.id)
-        // The worst any destination has seen. The expensive step is the export, which is
-        // shared, so a file too big to finish is too big whichever server it was going to.
-        for (localId, count) in await ledger.interruptions(for: account.id) {
-            interruptions[localId] = max(interruptions[localId] ?? 0, count)
-        }
+        // Settled files will not be tried again, and an asset that is gone or excluded
+        // is not in this pass's queue either. Both would otherwise sit in a file read
+        // in full at the start of every pass.
+        await ledger.pruneInterruptions(
+            settled: settled, present: Set(localIds), for: account.id
+        )
+        interruptions[account.id] = await ledger.interruptions(for: account.id)
     }
 
     func wanted(_ localId: String, by account: Account) -> Bool {
@@ -230,6 +235,7 @@ public func runBackupPass(
     /// Destinations out for the rest of this pass. Only ever added to, which is what makes
     /// the walk below finite.
     var unreachable: Set<String> = []
+    var accepted: Set<String> = []
     /// Pairs each destination has an answer about, so that dropping one can credit the
     /// rest of its queue to the progress bar rather than freezing it part-way.
     var dealtWith: [String: Int] = [:]
@@ -251,7 +257,19 @@ public func runBackupPass(
     effects.report(BackupProgress(completed: 0, total: total))
     defer { effects.report(nil) }
 
-    for localId in passOrder(localIds, deferring: interruptions) {
+    // Held back only when every destination still waiting has been cut short on it.
+    // One destination's deferrals must not reorder a destination that has not.
+    var heldBack: [String: Int] = [:]
+    for localId in localIds {
+        let wanting = destinations.filter { wanted(localId, by: $0) }
+        guard !wanting.isEmpty else { continue }
+        let stuck = wanting.allSatisfy {
+            (interruptions[$0.id]?[localId] ?? 0) >= deferAfterInterruptions
+        }
+        if stuck { heldBack[localId] = deferAfterInterruptions }
+    }
+
+    for localId in passOrder(localIds, deferring: heldBack) {
         if effects.isCancelled() {
             cancelled = true
             break
@@ -295,30 +313,47 @@ public func runBackupPass(
                 )
                 await ledger.clearInterruption(localId, for: account.id)
                 uploaded += 1
+                accepted.insert(account.id)
                 answered(account.id)
             case .failure(let error):
+                // Before auth or reachability. A stop that arrives as
+                // `networkConnectionLost`, or a cancelled refresh that arrives as a
+                // 401, is the pass ending — not this destination being down, and not
+                // a failure row for a file the pass was told to leave alone.
                 let disposition = uploadDisposition(of: error)
-                switch disposition {
-                case .unavailable:
-                    // This server is having a bad day. Stop pushing at it — and only at
-                    // it, because a dead second server must not hold up a healthy first.
-                    message = "Couldn't reach the server. Backup will carry on later."
-                    drop(account.id)
-                case .cancelled:
+                if disposition == .cancelled || effects.isCancelled() {
                     await ledger.recordInterruption(localId, for: account.id)
                     cancelled = true
-                case .rejected, .deferred:
-                    // `spendsAttempt` asked rather than restated: the rule #39 is about
-                    // must have one home, or changing it changes nothing here.
-                    await recordProblem(
-                        localId, for: account.id, because: uploadFailureMessage(error),
-                        named: file.lastPathComponent,
-                        spendingAttempt: disposition.spendsAttempt, in: ledger
-                    )
-                    if disposition == .deferred {
-                        await ledger.recordInterruption(localId, for: account.id)
+                } else {
+                    switch disposition {
+                    case .unavailable:
+                        // This server is having a bad day. Stop pushing at it — and only at
+                        // it, because a dead second server must not hold up a healthy first.
+                        message = "Couldn't reach the server. Backup will carry on later."
+                        drop(account.id)
+                    case .unauthorized:
+                        message = "Sign in again. Backup will carry on once you do."
+                        await recordProblem(
+                            localId, for: account.id, because: uploadFailureMessage(error),
+                            named: file.lastPathComponent,
+                            spendingAttempt: disposition.spendsAttempt, in: ledger
+                        )
+                        drop(account.id)
+                    case .rejected, .deferred:
+                        // `spendsAttempt` asked rather than restated: the rule #39 is about
+                        // must have one home, or changing it changes nothing here.
+                        await recordProblem(
+                            localId, for: account.id, because: uploadFailureMessage(error),
+                            named: file.lastPathComponent,
+                            spendingAttempt: disposition.spendsAttempt, in: ledger
+                        )
+                        if disposition == .deferred {
+                            await ledger.recordInterruption(localId, for: account.id)
+                        }
+                        answered(account.id)
+                    case .cancelled:
+                        break
                     }
-                    answered(account.id)
                 }
             }
 
@@ -374,12 +409,12 @@ public func runBackupPass(
     // just before the end and vanishing.
     effects.report(BackupProgress(completed: completed, total: total))
 
-    // Everything the pass could do for this destination, it did. A file the server refused
-    // or the device would not hand over is reported as a failure and counted on the screen
-    // beside this timestamp, so the two together are honest; withholding the timestamp
-    // instead would freeze it for ever over one bad photograph, which is the regression
-    // ergofobe/imogen-ios#37 shipped. Only a destination that went unreachable is unfinished.
-    let complete = destinations.map(\.id).filter { !unreachable.contains($0) }
+    // "Last completed" means something from this destination arrived. A pass that
+    // delivered nothing — deferred, refused, or signed out — must not move it, or
+    // settings says the backup finished. One bad photograph beside a file that did
+    // arrive still stamps, which is the regression ergofobe/imogen-ios#37 shipped
+    // a withheld timestamp for.
+    let complete = destinations.map(\.id).filter { accepted.contains($0) }
     await recordCompleted(complete, in: ledger)
     return BackupPassOutcome(
         uploaded: uploaded, completedDestinations: complete, message: message

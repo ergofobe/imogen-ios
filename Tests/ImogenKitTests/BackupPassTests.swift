@@ -435,9 +435,10 @@ final class BackupPassTests: XCTestCase {
         XCTAssertTrue(settled.isEmpty)
     }
 
-    func testAnAuthErrorDoesNotEndTheDestination() async {
+    func testAnAuthErrorEndsTheDestinationWithoutSpendingAnAttempt() async {
         for status in [401, 403] {
-            let ledger = self.ledger()
+            // One directory for both statuses made the 403 case read the 401 row.
+            let ledger = UploadLedger(directory: directory.appending(path: "auth-\(status)"))
             let world = World()
             let auth = ImogenError(
                 status: status, code: "unauthorized", message: "Session expired"
@@ -448,21 +449,51 @@ final class BackupPassTests: XCTestCase {
                 ["a", "b"], to: [account("one")], ledger: ledger, effects: world.effects()
             )
 
-            // A stale token used to be read as the destination being unreachable, which
-            // stopped the pass after the first file and left the rest of the camera roll
-            // untouched — with no failure row to say why.
-            XCTAssertEqual(world.uploads.map(\.localId), ["a", "b"], "status \(status)")
-            XCTAssertEqual(outcome.uploaded, 1, "status \(status)")
-            XCTAssertEqual(outcome.completedDestinations, ["one"], "status \(status)")
-            XCTAssertNil(outcome.message, "status \(status)")
+            XCTAssertEqual(world.uploads.map(\.localId), ["a"], "status \(status)")
+            XCTAssertEqual(world.exported, ["a"], "status \(status)")
+            XCTAssertEqual(outcome.uploaded, 0, "status \(status)")
+            XCTAssertTrue(outcome.completedDestinations.isEmpty, "status \(status)")
+            XCTAssertEqual(
+                outcome.message,
+                "Sign in again. Backup will carry on once you do.",
+                "status \(status)"
+            )
+            let attempts = await ledger.attempts("a", for: "one")
+            XCTAssertEqual(attempts, 0, "status \(status)")
             let listed = await ledger.failures(for: "one")
             XCTAssertEqual(listed.map(\.localId), ["a"], "status \(status)")
             XCTAssertEqual(listed.first?.lastError, "Session expired", "status \(status)")
-            let attempts = await ledger.attempts("a", for: "one")
-            XCTAssertEqual(attempts, 0, "status \(status)")
+            let stamped = await ledger.lastCompleted(for: "one")
+            XCTAssertNil(stamped, "status \(status)")
             let interruptions = await ledger.interruptions(for: "one")
-            XCTAssertEqual(interruptions["a"], 1, "status \(status)")
+            XCTAssertNil(interruptions["a"], "status \(status)")
         }
+    }
+
+    func testAnAuthErrorOnOneDestinationLeavesTheOtherWorking() async {
+        let ledger = self.ledger()
+        let world = World()
+        world.answers["two/a"] = .failure(
+            ImogenError(status: 401, code: "unauthorized", message: "Session expired")
+        )
+
+        let outcome = await runBackupPass(
+            ["a", "b"], to: [account("one"), account("two")],
+            ledger: ledger, effects: world.effects()
+        )
+
+        XCTAssertEqual(
+            world.uploads.filter { $0.accountId == "one" }.map(\.localId), ["a", "b"]
+        )
+        XCTAssertEqual(
+            world.uploads.filter { $0.accountId == "two" }.map(\.localId), ["a"]
+        )
+        XCTAssertEqual(outcome.completedDestinations, ["one"])
+        XCTAssertEqual(
+            outcome.message, "Sign in again. Backup will carry on once you do."
+        )
+        let dead = await ledger.lastCompleted(for: "two")
+        XCTAssertNil(dead)
     }
 
     // MARK: - One destination's bad day is not another's
@@ -650,6 +681,173 @@ final class BackupPassTests: XCTestCase {
 
         XCTAssertNil(world.progress.last ?? BackupProgress(completed: 0, total: 0))
     }
+
+    func testLastCompletedStaysPutWhenNothingWasAccepted() async {
+        let ledger = self.ledger()
+        let deferred = World()
+        deferred.answers["a"] = .failure(Unreadable())
+        deferred.answers["b"] = .failure(Unreadable())
+        let deferredOutcome = await runBackupPass(
+            ["a", "b"], to: [account("one")], ledger: ledger, effects: deferred.effects()
+        )
+        XCTAssertEqual(deferredOutcome.uploaded, 0)
+        XCTAssertTrue(deferredOutcome.completedDestinations.isEmpty)
+        let stamped = await ledger.lastCompleted(for: "one")
+        XCTAssertNil(stamped)
+
+        let rejected = World()
+        rejected.answers["c"] = .failure(permanent())
+        let rejectedOutcome = await runBackupPass(
+            ["c"], to: [account("one")], ledger: ledger, effects: rejected.effects()
+        )
+        XCTAssertTrue(rejectedOutcome.completedDestinations.isEmpty)
+        let still = await ledger.lastCompleted(for: "one")
+        XCTAssertNil(still)
+    }
+
+    func testLastCompletedMovesOnceSomethingArrived() async {
+        let ledger = self.ledger()
+        let world = World()
+        world.answers["b"] = .failure(transient())
+
+        let outcome = await runBackupPass(
+            ["a", "b", "c"], to: [account("one")], ledger: ledger, effects: world.effects()
+        )
+
+        // The server died on the second file. The first one did arrive, so the
+        // timestamp moves; the third is not pushed at a destination that is down.
+        XCTAssertEqual(outcome.uploaded, 1)
+        XCTAssertEqual(world.uploads.map(\.localId), ["a", "b"])
+        XCTAssertEqual(outcome.completedDestinations, ["one"])
+        let stamped = await ledger.lastCompleted(for: "one")
+        XCTAssertNotNil(stamped)
+    }
+
+    func testACancelledUploadIsNotFiledAsAuthOrUnreachable() async {
+        let cases: [Error] = [
+            ImogenError(status: 401, code: "unauthorized", message: "No"),
+            URLError(.networkConnectionLost),
+        ]
+        for (index, error) in cases.enumerated() {
+            let ledger = UploadLedger(directory: directory.appending(path: "cancel-\(index)"))
+            let world = World()
+            world.answers["a"] = .failure(error)
+            world.cancelAfterUploads = 1
+
+            let outcome = await runBackupPass(
+                ["a", "b"], to: [account("one")], ledger: ledger, effects: world.effects()
+            )
+
+            XCTAssertEqual(world.uploads.map(\.localId), ["a"], "case \(index)")
+            XCTAssertNil(outcome.message, "case \(index)")
+            XCTAssertTrue(outcome.completedDestinations.isEmpty, "case \(index)")
+            let attempts = await ledger.attempts("a", for: "one")
+            XCTAssertEqual(attempts, 0, "case \(index)")
+            let interruptions = await ledger.interruptions(for: "one")
+            XCTAssertEqual(interruptions["a"], 1, "case \(index)")
+            let listed = await ledger.failures(for: "one")
+            XCTAssertTrue(listed.isEmpty, "case \(index)")
+        }
+    }
+
+    func testADecodeErrorIsBoundedInsteadOfRetriedForever() async {
+        let ledger = self.ledger()
+        let broken = DecodingError.dataCorrupted(
+            DecodingError.Context(codingPath: [], debugDescription: "not a body")
+        )
+        for _ in 1...maxUploadAttempts {
+            let world = World()
+            world.answers["a"] = .failure(broken)
+            _ = await runBackupPass(
+                ["a", "b"], to: [account("one")], ledger: ledger, effects: world.effects()
+            )
+        }
+
+        let settled = await ledger.settled(for: "one")
+        XCTAssertTrue(settled.contains("a"))
+        let attempts = await ledger.attempts("a", for: "one")
+        XCTAssertEqual(attempts, maxUploadAttempts)
+
+        // "b" arrived while "a" was being refused, so a later pass has nothing left
+        // to send — and in particular does not export "a" again.
+        let again = World()
+        again.answers["a"] = .failure(broken)
+        _ = await runBackupPass(
+            ["a", "b"], to: [account("one")], ledger: ledger, effects: again.effects()
+        )
+        XCTAssertFalse(again.uploads.map(\.localId).contains("a"))
+        XCTAssertTrue(again.exported.isEmpty)
+    }
+
+    func testOneDestinationsDeferralsDoNotReorderAnother() async {
+        let ledger = self.ledger()
+        for _ in 1...deferAfterInterruptions {
+            await ledger.recordInterruption("a", for: "two")
+        }
+        let world = World()
+        _ = await runBackupPass(
+            ["a", "b"], to: [account("one"), account("two")],
+            ledger: ledger, effects: world.effects()
+        )
+
+        XCTAssertEqual(
+            world.uploads.filter { $0.accountId == "one" }.map(\.localId), ["a", "b"]
+        )
+        XCTAssertEqual(
+            world.uploads.filter { $0.accountId == "two" }.map(\.localId), ["a", "b"]
+        )
+    }
+
+    func testAFileEveryDestinationKeepsMissingGoesToTheBack() async {
+        let ledger = self.ledger()
+        for accountId in ["one", "two"] {
+            for _ in 1...deferAfterInterruptions {
+                await ledger.recordInterruption("a", for: accountId)
+            }
+        }
+        let world = World()
+        _ = await runBackupPass(
+            ["a", "b"], to: [account("one"), account("two")],
+            ledger: ledger, effects: world.effects()
+        )
+
+        XCTAssertEqual(
+            world.uploads.map { "\($0.accountId)/\($0.localId)" },
+            ["one/b", "two/b", "one/a", "two/a"]
+        )
+    }
+
+    func testADeferralStillMovesTheFileWhenItIsTheOnlyDestinationLeft() async {
+        let ledger = self.ledger()
+        await ledger.put(UploadRecord(localId: "a", assetId: "remote-a"), for: "one")
+        for _ in 1...deferAfterInterruptions {
+            await ledger.recordInterruption("a", for: "two")
+        }
+        let world = World()
+        _ = await runBackupPass(
+            ["a", "b"], to: [account("one"), account("two")],
+            ledger: ledger, effects: world.effects()
+        )
+
+        XCTAssertEqual(
+            world.uploads.filter { $0.accountId == "two" }.map(\.localId), ["b", "a"]
+        )
+    }
+
+    func testInterruptionsForAssetsThatAreGoneAreDropped() async {
+        let ledger = self.ledger()
+        await ledger.recordInterruption("deleted", for: "one")
+        await ledger.recordInterruption("excluded", for: "one")
+        let world = World()
+        _ = await runBackupPass(
+            ["a"], to: [account("one")], ledger: ledger, effects: world.effects()
+        )
+
+        let left = await ledger.interruptions(for: "one")
+        XCTAssertNil(left["deleted"])
+        XCTAssertNil(left["excluded"])
+    }
+
 }
 
 /// How an upload failure is classified, which is the decision ergofobe/imogen-ios#39 is
@@ -758,9 +956,23 @@ final class CancellationShapeTests: XCTestCase {
     func testAStaleTokenIsTheSessionsProblem() {
         for status in [401, 403] {
             let error = ImogenError(status: status, code: "unauthorized", message: "No")
-            XCTAssertEqual(uploadDisposition(of: error), .deferred)
+            XCTAssertEqual(uploadDisposition(of: error), .unauthorized)
             XCTAssertFalse(uploadDisposition(of: error).spendsAttempt)
         }
+    }
+
+    func testABodyThatWillNotDecodeOrEncodeIsBounded() {
+        let decoded = DecodingError.dataCorrupted(
+            DecodingError.Context(codingPath: [], debugDescription: "not a body")
+        )
+        XCTAssertEqual(uploadDisposition(of: decoded), .rejected)
+        XCTAssertTrue(uploadDisposition(of: decoded).spendsAttempt)
+
+        let encoded = EncodingError.invalidValue(
+            0, EncodingError.Context(codingPath: [], debugDescription: "not a body")
+        )
+        XCTAssertEqual(uploadDisposition(of: encoded), .rejected)
+        XCTAssertTrue(uploadDisposition(of: encoded).spendsAttempt)
     }
 }
 

@@ -282,6 +282,68 @@ final class PhotoBackup {
     /// file the camera wrote, EXIF and all, rather than something re-encoded on the way
     /// out. A photograph that arrives on the server without its capture date is a
     /// photograph in the wrong place in the timeline for ever.
+    /// Remembers the request `requestData` returns. A cancellation can arrive before
+    /// that identifier does, and the download still has to be stopped.
+    private final class ExportTransfer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var requestID: PHAssetResourceDataRequestID?
+        private var cancelRequested = false
+        private var handle: FileHandle?
+        private var writeError: Error?
+        private var resumed = false
+
+        func store(_ handle: FileHandle) {
+            lock.lock()
+            self.handle = handle
+            lock.unlock()
+        }
+
+        func arm(_ id: PHAssetResourceDataRequestID) -> PHAssetResourceDataRequestID? {
+            lock.lock()
+            requestID = id
+            let cancel = cancelRequested
+            lock.unlock()
+            return cancel ? id : nil
+        }
+
+        func cancel() -> PHAssetResourceDataRequestID? {
+            lock.lock()
+            cancelRequested = true
+            let id = requestID
+            lock.unlock()
+            return id
+        }
+
+        func receive(_ data: Data) {
+            var cancelID: PHAssetResourceDataRequestID?
+            lock.lock()
+            if let handle {
+                do {
+                    try handle.write(contentsOf: data)
+                } catch {
+                    if writeError == nil { writeError = error }
+                    cancelID = requestID
+                }
+            }
+            lock.unlock()
+            if let cancelID {
+                PHAssetResourceManager.default().cancelDataRequest(cancelID)
+            }
+        }
+
+        func finish(_ error: Error?) -> (resume: Bool, failure: Error?) {
+            lock.lock()
+            let failure = writeError ?? error
+            let handle = self.handle
+            self.handle = nil
+            let resume = !resumed
+            resumed = true
+            lock.unlock()
+            try? handle?.close()
+            return (resume, failure)
+        }
+    }
+
     private func export(_ asset: PHAsset) async -> Result<URL, Error> {
         let resources = PHAssetResource.assetResources(for: asset)
         let preferred: [PHAssetResourceType] = [
@@ -306,18 +368,45 @@ final class PhotoBackup {
         // this can be a download from iCloud, so it fails for network reasons and for an
         // expiring background window as readily as for a broken file, and only
         // `uploadDisposition(of:)` may decide which of those costs the file anything.
-        return await withCheckedContinuation { continuation in
-            PHAssetResourceManager.default().writeData(
-                for: resource, toFile: target, options: options
-            ) { error in
-                guard let error else { return continuation.resume(returning: .success(target)) }
-                // A part-written export is bytes nothing will ever sweep up, and a file
-                // that is no longer given up on after three tries is one that would leave
-                // a fresh partial video in tmp on every pass.
-                try? FileManager.default.removeItem(at: target)
-                continuation.resume(returning: .failure(error))
+        // `writeData` returns no request identifier, so a Stop or an expiring window
+        // cannot interrupt a multi-gigabyte iCloud download. These are the same bytes.
+        let transfer = ExportTransfer()
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                FileManager.default.createFile(atPath: target.path, contents: nil)
+                guard let handle = try? FileHandle(forWritingTo: target) else {
+                    continuation.resume(returning: .failure(CocoaError(.fileWriteUnknown)))
+                    return
+                }
+                transfer.store(handle)
+                let id = PHAssetResourceManager.default().requestData(
+                    for: resource,
+                    options: options,
+                    dataReceivedHandler: { transfer.receive($0) },
+                    completionHandler: { error in
+                        let finished = transfer.finish(error)
+                        guard finished.resume else { return }
+                        if let failure = finished.failure {
+                            // A part-written export is bytes nothing will ever sweep up,
+                            // and a file that is no longer given up on after three tries
+                            // is one that would leave a fresh partial video in tmp on
+                            // every pass.
+                            try? FileManager.default.removeItem(at: target)
+                            continuation.resume(returning: .failure(failure))
+                        } else {
+                            continuation.resume(returning: .success(target))
+                        }
+                    }
+                )
+                if let id = transfer.arm(id) {
+                    PHAssetResourceManager.default().cancelDataRequest(id)
+                }
             }
-        }
+        }, onCancel: {
+            if let id = transfer.cancel() {
+                PHAssetResourceManager.default().cancelDataRequest(id)
+            }
+        })
     }
 }
 
