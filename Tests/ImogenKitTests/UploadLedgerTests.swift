@@ -213,4 +213,76 @@ final class UploadLedgerTests: XCTestCase {
         let at = await ledger.lastCompleted(for: "acc")
         XCTAssertNil(at)
     }
+
+    func testAPassThatStopsKeepsTheRecordsItFinished() async throws {
+        let ledger = self.ledger()
+        await ledger.put(UploadRecord(localId: "a", assetId: "remote-a"), for: "acc")
+        await ledger.put(
+            UploadRecord(localId: "b", attempts: 1, lastError: "later"), for: "acc"
+        )
+
+        let names = try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil
+        ).map(\.lastPathComponent)
+        XCTAssertTrue(names.contains("uploads-acc.journal"))
+        XCTAssertFalse(names.contains("uploads-acc.json"))
+
+        let fresh = UploadLedger(directory: directory)
+        let records = await fresh.records(for: "acc")
+        XCTAssertEqual(records["a"]?.assetId, "remote-a")
+        XCTAssertEqual(records["b"]?.attempts, 1)
+    }
+
+    func testAnInterruptionDoesNotRewriteTheWholeAccountFile() async throws {
+        let ledger = self.ledger()
+        await ledger.recordInterruption("a", for: "acc")
+        await ledger.recordInterruption("a", for: "acc")
+
+        let names = try FileManager.default.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: nil
+        ).map(\.lastPathComponent)
+        XCTAssertTrue(names.contains("interrupted-acc.journal"))
+        XCTAssertFalse(names.contains("interrupted-acc.json"))
+
+        let fresh = UploadLedger(directory: directory)
+        let counts = await fresh.interruptions(for: "acc")
+        XCTAssertEqual(counts["a"], 2)
+
+        await ledger.clearInterruption("a", for: "acc")
+        let cleared = UploadLedger(directory: directory)
+        let left = await cleared.interruptions(for: "acc")
+        XCTAssertTrue(left.isEmpty)
+    }
+
+    func testPruneDropsInterruptionsForAssetsThatAreGone() async {
+        let ledger = self.ledger()
+        await ledger.recordInterruption("kept", for: "acc")
+        await ledger.recordInterruption("deleted", for: "acc")
+        await ledger.recordInterruption("givenUp", for: "acc")
+        await ledger.pruneInterruptions(
+            settled: ["givenUp"], present: ["kept", "givenUp"], for: "acc"
+        )
+
+        let left = await ledger.interruptions(for: "acc")
+        XCTAssertEqual(left, ["kept": 1])
+        let fresh = UploadLedger(directory: directory)
+        let readBack = await fresh.interruptions(for: "acc")
+        XCTAssertEqual(readBack, ["kept": 1])
+    }
+
+    func testATornJournalTailDoesNotDropEarlierRecords() async throws {
+        let ledger = self.ledger()
+        await ledger.put(UploadRecord(localId: "a", assetId: "remote-a"), for: "acc")
+        await ledger.put(UploadRecord(localId: "b", assetId: "remote-b"), for: "acc")
+        let journal = directory.appending(path: "uploads-acc.journal")
+        var data = try Data(contentsOf: journal)
+        data.removeLast(8)
+        data.append(0xFF)
+        try data.write(to: journal)
+
+        let fresh = UploadLedger(directory: directory)
+        let records = await fresh.records(for: "acc")
+        XCTAssertEqual(records["a"]?.assetId, "remote-a")
+        XCTAssertNil(records["b"])
+    }
 }

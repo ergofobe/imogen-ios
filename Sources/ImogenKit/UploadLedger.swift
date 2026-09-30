@@ -21,6 +21,9 @@ public struct UploadRecord: Codable, Hashable, Sendable {
     /// this existed have none — and because a decoder that refused them would take a
     /// backup's whole history with it on upgrade.
     public var displayName: String?
+    /// The server accepted the bytes and the response could not be read.
+    /// No asset id: nothing was decoded. Settled so it is not sent again.
+    public var landed: Bool
 
     public init(
         localId: String,
@@ -28,7 +31,8 @@ public struct UploadRecord: Codable, Hashable, Sendable {
         uploadedAt: Double = Date().timeIntervalSince1970,
         attempts: Int = 0,
         lastError: String? = nil,
-        displayName: String? = nil
+        displayName: String? = nil,
+        landed: Bool = false
     ) {
         self.localId = localId
         self.assetId = assetId
@@ -36,6 +40,33 @@ public struct UploadRecord: Codable, Hashable, Sendable {
         self.attempts = attempts
         self.lastError = lastError
         self.displayName = displayName
+        self.landed = landed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case localId, assetId, uploadedAt, attempts, lastError, displayName, landed
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        localId = try values.decode(String.self, forKey: .localId)
+        assetId = try values.decodeIfPresent(String.self, forKey: .assetId)
+        uploadedAt = try values.decode(Double.self, forKey: .uploadedAt)
+        attempts = try values.decodeIfPresent(Int.self, forKey: .attempts) ?? 0
+        lastError = try values.decodeIfPresent(String.self, forKey: .lastError)
+        displayName = try values.decodeIfPresent(String.self, forKey: .displayName)
+        landed = try values.decodeIfPresent(Bool.self, forKey: .landed) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(localId, forKey: .localId)
+        try values.encodeIfPresent(assetId, forKey: .assetId)
+        try values.encode(uploadedAt, forKey: .uploadedAt)
+        try values.encode(attempts, forKey: .attempts)
+        try values.encodeIfPresent(lastError, forKey: .lastError)
+        try values.encodeIfPresent(displayName, forKey: .displayName)
+        try values.encode(landed, forKey: .landed)
     }
 
     public var isDone: Bool { assetId != nil }
@@ -115,6 +146,7 @@ public let maxUploadAttempts = 3
 public actor UploadLedger {
     private let directory: URL
     private var loaded: [String: [String: UploadRecord]] = [:]
+    private var loadedInterruptions: [String: [String: Int]] = [:]
 
     public init(directory: URL) {
         self.directory = directory
@@ -125,19 +157,18 @@ public actor UploadLedger {
 
     public func records(for accountId: String) -> [String: UploadRecord] {
         if let cached = loaded[accountId] { return cached }
-        let url = file(for: accountId)
-        let decoded = (try? Data(contentsOf: url))
-            .flatMap { try? JSONDecoder().decode([String: UploadRecord].self, from: $0) }
-            ?? [:]
-        loaded[accountId] = decoded
-        return decoded
+        let merged = readRecords(accountId)
+        loaded[accountId] = merged
+        return merged
     }
 
     /// Local identifiers that need no further attention: done, or tried too often.
     public func settled(for accountId: String) -> Set<String> {
         Set(
             records(for: accountId)
-                .filter { $0.value.isDone || $0.value.attempts >= maxUploadAttempts }
+                .filter {
+                    $0.value.isDone || $0.value.landed || $0.value.attempts >= maxUploadAttempts
+                }
                 .keys
         )
     }
@@ -146,17 +177,21 @@ public actor UploadLedger {
         var current = records(for: accountId)
         current[record.localId] = record
         loaded[accountId] = current
-        persist(accountId)
+        append(record, to: journalFile(for: accountId))
     }
 
     public func attempts(_ localId: String, for accountId: String) -> Int {
         records(for: accountId)[localId]?.attempts ?? 0
     }
 
+    public func record(_ localId: String, for accountId: String) -> UploadRecord? {
+        records(for: accountId)[localId]
+    }
+
     /// Everything outstanding for one account, newest first.
     public func failures(for accountId: String) -> [UploadRecord] {
         records(for: accountId).values
-            .filter { !$0.isDone }
+            .filter { !$0.isDone && !$0.landed }
             .sorted { $0.uploadedAt > $1.uploadedAt }
     }
 
@@ -193,6 +228,9 @@ public actor UploadLedger {
     /// reason goes with it rather than staying to describe a failure that is no longer the
     /// current answer.
     public func retry(_ localId: String, for accountId: String) {
+        // Before the guard: a file that has only ever been cut short mid-upload has an
+        // interruption and no record, so a guard on the record would never reach this.
+        clearInterruption(localId, for: accountId)
         guard let existing = records(for: accountId)[localId], !existing.isDone else { return }
         put(
             UploadRecord(
@@ -224,6 +262,56 @@ public actor UploadLedger {
         return at
     }
 
+    /// How often a pass has been cut short while sending each file to this account.
+    ///
+    /// Beside the ledger rather than inside it, for the reason `completedFile` gives: the
+    /// ledger's file is what must never be lost, and this is a hint about queue order that
+    /// can be thrown away without costing anybody a photograph.
+    public func interruptions(for accountId: String) -> [String: Int] {
+        if let cached = loadedInterruptions[accountId] { return cached }
+        let merged = readInterruptions(accountId)
+        loadedInterruptions[accountId] = merged
+        return merged
+    }
+
+    /// A pass was stopped part-way through this file. Deliberately not an attempt: being
+    /// cut short is nobody's fault, and spending an attempt on it is what abandoned a
+    /// large video after three overnight expiries. See `passOrder(_:deferring:)`.
+    public func recordInterruption(_ localId: String, for accountId: String) {
+        var current = interruptions(for: accountId)
+        let count = (current[localId] ?? 0) + 1
+        current[localId] = count
+        loadedInterruptions[accountId] = current
+        append(
+            InterruptionMark(localId: localId, count: count),
+            to: interruptionJournal(for: accountId)
+        )
+    }
+
+    /// The file got through, or somebody asked for it to be tried properly. Either way it
+    /// goes back to its place in the queue. Safe on a file that has none.
+    public func clearInterruption(_ localId: String, for accountId: String) {
+        var current = interruptions(for: accountId)
+        guard current.removeValue(forKey: localId) != nil else { return }
+        loadedInterruptions[accountId] = current
+        append(
+            InterruptionMark(localId: localId, count: nil),
+            to: interruptionJournal(for: accountId)
+        )
+    }
+
+    /// Queue positions for files nothing will try again, and for assets that are gone
+    /// or excluded. Pruned rather than left, because this file is decoded in full at
+    /// the start of every pass.
+    public func pruneInterruptions(
+        settled: Set<String>, present: Set<String>, for accountId: String
+    ) {
+        let current = interruptions(for: accountId)
+        let kept = current.filter { present.contains($0.key) && !settled.contains($0.key) }
+        guard kept.count != current.count else { return }
+        writeInterruptions(kept, for: accountId)
+    }
+
     public func recordCompleted(at moment: Double, for accountId: String) {
         guard let data = try? JSONEncoder().encode(moment) else { return }
         try? data.write(to: completedFile(for: accountId), options: .atomic)
@@ -235,15 +323,145 @@ public actor UploadLedger {
 
     public func forget(accountId: String) {
         loaded[accountId] = nil
+        loadedInterruptions[accountId] = nil
         try? FileManager.default.removeItem(at: file(for: accountId))
+        try? FileManager.default.removeItem(at: journalFile(for: accountId))
         try? FileManager.default.removeItem(at: completedFile(for: accountId))
+        try? FileManager.default.removeItem(at: interruptionsFile(for: accountId))
+        try? FileManager.default.removeItem(at: interruptionJournal(for: accountId))
     }
 
-    private func persist(_ accountId: String) {
-        guard let records = loaded[accountId],
-            let data = try? JSONEncoder().encode(records)
-        else { return }
-        try? data.write(to: file(for: accountId), options: .atomic)
+    private struct InterruptionMark: Codable {
+        var localId: String
+        var count: Int?
+    }
+
+    /// One framed record. Rewriting the whole account file per photograph is what a
+    /// pass that defers was doing twice, and a line still on disk is a record a pass
+    /// that is killed mid-way does not have to do again.
+    private func append(_ value: some Encodable, to url: URL) {
+        guard let payload = try? JSONEncoder().encode(value) else { return }
+        var frame = Data(count: 4 + payload.count)
+        let count = UInt32(payload.count)
+        frame[0] = UInt8((count >> 24) & 0xFF)
+        frame[1] = UInt8((count >> 16) & 0xFF)
+        frame[2] = UInt8((count >> 8) & 0xFF)
+        frame[3] = UInt8(count & 0xFF)
+        frame.replaceSubrange(4..<frame.count, with: payload)
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? frame.write(to: url, options: .atomic)
+            return
+        }
+        do {
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: frame)
+            try handle.synchronize()
+        } catch {
+            return
+        }
+    }
+
+    /// Length-prefixed records. A short tail is dropped; everything before it is kept.
+    /// A journal written before framing (one JSON value per line) still loads.
+    private func lines(of url: URL) -> [Data] {
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return [] }
+        if data[data.startIndex] == UInt8(ascii: "{") { return legacyLines(data) }
+        var records: [Data] = []
+        var index = 0
+        while index + 4 <= data.count {
+            let count = (Int(data[index]) << 24) | (Int(data[index + 1]) << 16)
+                | (Int(data[index + 2]) << 8) | Int(data[index + 3])
+            let end = index + 4 + count
+            if count < 0 || end > data.count { break }
+            records.append(data.subdata(in: (index + 4)..<end))
+            index = end
+        }
+        return records
+    }
+
+    private func legacyLines(_ data: Data) -> [Data] {
+        var records: [Data] = []
+        var start = 0
+        func take(_ slice: Data) {
+            guard !slice.isEmpty, String(bytes: slice, encoding: .utf8) != nil else { return }
+            records.append(slice)
+        }
+        for index in data.indices {
+            if data[index] == 0x0A {
+                take(data.subdata(in: start..<index))
+                start = index + 1
+            }
+        }
+        if start < data.count {
+            let tail = data.subdata(in: start..<data.count)
+            if String(bytes: tail, encoding: .utf8) != nil,
+                (try? JSONSerialization.jsonObject(with: tail)) != nil
+            {
+                records.append(tail)
+            }
+        }
+        return records
+    }
+
+    private func readRecords(_ accountId: String) -> [String: UploadRecord] {
+        let snapshot = file(for: accountId)
+        var merged =
+            (try? Data(contentsOf: snapshot)).flatMap {
+                try? JSONDecoder().decode([String: UploadRecord].self, from: $0)
+            } ?? [:]
+        let journal = journalFile(for: accountId)
+        var applied = false
+        for line in lines(of: journal) {
+            guard let record = try? JSONDecoder().decode(UploadRecord.self, from: line)
+            else { continue }
+            merged[record.localId] = record
+            applied = true
+        }
+        if applied { compact(merged, snapshot: snapshot, journal: journal) }
+        return merged
+    }
+
+    private func readInterruptions(_ accountId: String) -> [String: Int] {
+        let snapshot = interruptionsFile(for: accountId)
+        var merged =
+            (try? Data(contentsOf: snapshot)).flatMap {
+                try? JSONDecoder().decode([String: Int].self, from: $0)
+            } ?? [:]
+        let journal = interruptionJournal(for: accountId)
+        var applied = false
+        for line in lines(of: journal) {
+            guard let mark = try? JSONDecoder().decode(InterruptionMark.self, from: line)
+            else { continue }
+            if let count = mark.count {
+                merged[mark.localId] = count
+            } else {
+                merged.removeValue(forKey: mark.localId)
+            }
+            applied = true
+        }
+        if applied { compact(merged, snapshot: snapshot, journal: journal) }
+        return merged
+    }
+
+    private func compact<T: Encodable>(_ value: T, snapshot: URL, journal: URL) {
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        do {
+            try data.write(to: snapshot, options: .atomic)
+        } catch {
+            return
+        }
+        try? FileManager.default.removeItem(at: journal)
+    }
+
+    private func writeInterruptions(_ counts: [String: Int], for accountId: String) {
+        loadedInterruptions[accountId] = counts
+        compact(
+            counts,
+            snapshot: interruptionsFile(for: accountId),
+            journal: interruptionJournal(for: accountId)
+        )
     }
 
     private func file(for accountId: String) -> URL {
@@ -255,5 +473,17 @@ public actor UploadLedger {
     /// lost, for the sake of one number.
     private func completedFile(for accountId: String) -> URL {
         directory.appendingPathComponent("completed-\(accountId).json")
+    }
+
+    private func interruptionsFile(for accountId: String) -> URL {
+        directory.appendingPathComponent("interrupted-\(accountId).json")
+    }
+
+    private func journalFile(for accountId: String) -> URL {
+        directory.appendingPathComponent("uploads-\(accountId).journal")
+    }
+
+    private func interruptionJournal(for accountId: String) -> URL {
+        directory.appendingPathComponent("interrupted-\(accountId).journal")
     }
 }
