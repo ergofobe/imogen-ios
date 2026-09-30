@@ -21,6 +21,9 @@ public struct UploadRecord: Codable, Hashable, Sendable {
     /// this existed have none — and because a decoder that refused them would take a
     /// backup's whole history with it on upgrade.
     public var displayName: String?
+    /// The server accepted the bytes and the response could not be read.
+    /// No asset id: nothing was decoded. Settled so it is not sent again.
+    public var landed: Bool
 
     public init(
         localId: String,
@@ -28,7 +31,8 @@ public struct UploadRecord: Codable, Hashable, Sendable {
         uploadedAt: Double = Date().timeIntervalSince1970,
         attempts: Int = 0,
         lastError: String? = nil,
-        displayName: String? = nil
+        displayName: String? = nil,
+        landed: Bool = false
     ) {
         self.localId = localId
         self.assetId = assetId
@@ -36,6 +40,33 @@ public struct UploadRecord: Codable, Hashable, Sendable {
         self.attempts = attempts
         self.lastError = lastError
         self.displayName = displayName
+        self.landed = landed
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case localId, assetId, uploadedAt, attempts, lastError, displayName, landed
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        localId = try values.decode(String.self, forKey: .localId)
+        assetId = try values.decodeIfPresent(String.self, forKey: .assetId)
+        uploadedAt = try values.decode(Double.self, forKey: .uploadedAt)
+        attempts = try values.decodeIfPresent(Int.self, forKey: .attempts) ?? 0
+        lastError = try values.decodeIfPresent(String.self, forKey: .lastError)
+        displayName = try values.decodeIfPresent(String.self, forKey: .displayName)
+        landed = try values.decodeIfPresent(Bool.self, forKey: .landed) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(localId, forKey: .localId)
+        try values.encodeIfPresent(assetId, forKey: .assetId)
+        try values.encode(uploadedAt, forKey: .uploadedAt)
+        try values.encode(attempts, forKey: .attempts)
+        try values.encodeIfPresent(lastError, forKey: .lastError)
+        try values.encodeIfPresent(displayName, forKey: .displayName)
+        try values.encode(landed, forKey: .landed)
     }
 
     public var isDone: Bool { assetId != nil }
@@ -135,7 +166,9 @@ public actor UploadLedger {
     public func settled(for accountId: String) -> Set<String> {
         Set(
             records(for: accountId)
-                .filter { $0.value.isDone || $0.value.attempts >= maxUploadAttempts }
+                .filter {
+                    $0.value.isDone || $0.value.landed || $0.value.attempts >= maxUploadAttempts
+                }
                 .keys
         )
     }
@@ -158,7 +191,7 @@ public actor UploadLedger {
     /// Everything outstanding for one account, newest first.
     public func failures(for accountId: String) -> [UploadRecord] {
         records(for: accountId).values
-            .filter { !$0.isDone }
+            .filter { !$0.isDone && !$0.landed }
             .sorted { $0.uploadedAt > $1.uploadedAt }
     }
 
@@ -303,31 +336,73 @@ public actor UploadLedger {
         var count: Int?
     }
 
-    /// One value per line. Rewriting the whole account file per photograph is what a
+    /// One framed record. Rewriting the whole account file per photograph is what a
     /// pass that defers was doing twice, and a line still on disk is a record a pass
     /// that is killed mid-way does not have to do again.
     private func append(_ value: some Encodable, to url: URL) {
-        guard let data = try? JSONEncoder().encode(value) else { return }
-        var line = data
-        line.append(0x0A)
+        guard let payload = try? JSONEncoder().encode(value) else { return }
+        var frame = Data(count: 4 + payload.count)
+        let count = UInt32(payload.count)
+        frame[0] = UInt8((count >> 24) & 0xFF)
+        frame[1] = UInt8((count >> 16) & 0xFF)
+        frame[2] = UInt8((count >> 8) & 0xFF)
+        frame[3] = UInt8(count & 0xFF)
+        frame.replaceSubrange(4..<frame.count, with: payload)
         if !FileManager.default.fileExists(atPath: url.path) {
-            try? line.write(to: url, options: .atomic)
+            try? frame.write(to: url, options: .atomic)
             return
         }
         do {
             let handle = try FileHandle(forWritingTo: url)
             defer { try? handle.close() }
             try handle.seekToEnd()
-            try handle.write(contentsOf: line)
+            try handle.write(contentsOf: frame)
             try handle.synchronize()
         } catch {
             return
         }
     }
 
+    /// Length-prefixed records. A short tail is dropped; everything before it is kept.
+    /// A journal written before framing (one JSON value per line) still loads.
     private func lines(of url: URL) -> [Data] {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
-        return text.split(separator: "\n", omittingEmptySubsequences: true).map { Data($0.utf8) }
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else { return [] }
+        if data[data.startIndex] == UInt8(ascii: "{") { return legacyLines(data) }
+        var records: [Data] = []
+        var index = 0
+        while index + 4 <= data.count {
+            let count = (Int(data[index]) << 24) | (Int(data[index + 1]) << 16)
+                | (Int(data[index + 2]) << 8) | Int(data[index + 3])
+            let end = index + 4 + count
+            if count < 0 || end > data.count { break }
+            records.append(data.subdata(in: (index + 4)..<end))
+            index = end
+        }
+        return records
+    }
+
+    private func legacyLines(_ data: Data) -> [Data] {
+        var records: [Data] = []
+        var start = 0
+        func take(_ slice: Data) {
+            guard !slice.isEmpty, String(bytes: slice, encoding: .utf8) != nil else { return }
+            records.append(slice)
+        }
+        for index in data.indices {
+            if data[index] == 0x0A {
+                take(data.subdata(in: start..<index))
+                start = index + 1
+            }
+        }
+        if start < data.count {
+            let tail = data.subdata(in: start..<data.count)
+            if String(bytes: tail, encoding: .utf8) != nil,
+                (try? JSONSerialization.jsonObject(with: tail)) != nil
+            {
+                records.append(tail)
+            }
+        }
+        return records
     }
 
     private func readRecords(_ accountId: String) -> [String: UploadRecord] {

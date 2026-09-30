@@ -38,9 +38,13 @@ public enum UploadDisposition: Equatable, Sendable {
     /// only moves the file out of the queue's way.
     case deferred
 
-    /// The session will not authorise this destination. A 401 that reaches the pass
-    /// is a refresh that came back empty; a 403 is never refreshed. This destination
-    /// is done for the pass. The file's attempts are not.
+    /// The server took the bytes and the response could not be read. No asset id,
+    /// and not one of the file's attempts. Not sent again.
+    case landed
+
+    /// The session will not authorise this destination. A 403 is never refreshed.
+    /// A 401 is this only when refresh did not return a token. The other 401 is
+    /// `refreshedNotReplayed` and does not end the destination.
     case unauthorized
 
     /// Whether this costs the file one of its `maxUploadAttempts`, after which
@@ -74,24 +78,25 @@ public enum ExportFailure: Error, LocalizedError, Equatable, Sendable {
 /// resumable route, whose chunks *are* replayable — so the SDK reaches its backoff, and
 /// `Task.sleep` on a cancelled task throws `CancellationError`.
 ///
-/// Everything that is neither the network nor a settled answer is `.deferred` rather than
-/// the file's fault. The SDK throws plain Cocoa errors from `fileSize(of:)`,
-/// `Data(contentsOf:)` and `FileHandle`, and the photo library throws its own while
-/// fetching an asset that lives in iCloud — all of them conditions that pass.
-///
-/// A body that will not decode, or a value that will not encode, is not one of those.
-/// The upload may already have landed, and leaving it `.deferred` re-exports it forever.
+/// A PhotoKit or Cocoa error that is not a `URLError` spends attempts. Left
+/// `.deferred`, it re-exports forever and the completion stamp never moves.
+/// `DecodingError` is not in that bucket: `HTTPClient.request` throws it only
+/// after `send` has accepted a 2xx, so the bytes may already be on the server.
 public func uploadDisposition(of error: Error) -> UploadDisposition {
     if error is CancellationError { return .cancelled }
     if let url = error as? URLError {
         return url.code == .cancelled ? .cancelled : .unavailable
     }
-    if error is ExportFailure { return .rejected }
-    if error is DecodingError || error is EncodingError { return .rejected }
-    guard let imogen = error as? ImogenError else { return .deferred }
-    // A 401 that arrives here is a refresh that came back empty. A 403 is never
-    // refreshed. Neither is this file's fault, and neither is the server being down.
-    if imogen.isAuthError { return .unauthorized }
+    if error is ExportFailure || error is EncodingError { return .rejected }
+    if error is DecodingError { return .landed }
+    guard let imogen = error as? ImogenError else { return .rejected }
+    if (200..<300).contains(imogen.status) { return .landed }
+    // A 401 the caller marked `refreshedNotReplayed` still has a session.
+    // Any other 401, and every 403, does not.
+    if imogen.isAuthError {
+        if imogen.code == refreshedNotReplayed { return .deferred }
+        return .unauthorized
+    }
     // Status 0 is the SDK's "the request never reached a server".
     return imogen.isRetryable || imogen.status == 0 ? .unavailable : .rejected
 }
@@ -104,6 +109,11 @@ public func uploadFailureMessage(_ error: Error) -> String {
 /// How many times a pass may be cut short on one file before later passes stop letting it
 /// hold up the queue.
 public let deferAfterInterruptions = 2
+
+/// A 401 whose refresh returned a token. The multipart body was not replayed, so
+/// this is not an empty refresh. The SDK throws the same `ImogenError` either way;
+/// the caller that watched the access token change sets this.
+public let refreshedNotReplayed = "refreshed_not_replayed"
 
 /// Oldest first, except for files a pass keeps being cut short on, which go to the back.
 ///
@@ -329,7 +339,10 @@ public func runBackupPass(
                     case .unavailable:
                         // This server is having a bad day. Stop pushing at it — and only at
                         // it, because a dead second server must not hold up a healthy first.
-                        message = "Couldn't reach the server. Backup will carry on later."
+                        // A sign-in from earlier in this pass outranks a later outage.
+                        if message != "Sign in again. Backup will carry on once you do." {
+                            message = "Couldn't reach the server. Backup will carry on later."
+                        }
                         drop(account.id)
                     case .unauthorized:
                         message = "Sign in again. Backup will carry on once you do."
@@ -339,16 +352,26 @@ public func runBackupPass(
                             spendingAttempt: disposition.spendsAttempt, in: ledger
                         )
                         drop(account.id)
-                    case .rejected, .deferred:
-                        // `spendsAttempt` asked rather than restated: the rule #39 is about
-                        // must have one home, or changing it changes nothing here.
-                        await recordProblem(
-                            localId, for: account.id, because: uploadFailureMessage(error),
-                            named: file.lastPathComponent,
-                            spendingAttempt: disposition.spendsAttempt, in: ledger
+                    case .landed:
+                        await recordLanded(
+                            localId, for: account.id, named: file.lastPathComponent, in: ledger
                         )
-                        if disposition == .deferred {
-                            await ledger.recordInterruption(localId, for: account.id)
+                        answered(account.id)
+                    case .rejected, .deferred:
+                        // A refresh that returned a token is not this file's failure and
+                        // not a dead session. The file stays outstanding for the next pass.
+                        let refreshed = (error as? ImogenError)?.code == refreshedNotReplayed
+                        if !refreshed {
+                            // `spendsAttempt` asked rather than restated: the rule #39 is about
+                            // must have one home, or changing it changes nothing here.
+                            await recordProblem(
+                                localId, for: account.id, because: uploadFailureMessage(error),
+                                named: file.lastPathComponent,
+                                spendingAttempt: disposition.spendsAttempt, in: ledger
+                            )
+                            if disposition == .deferred {
+                                await ledger.recordInterruption(localId, for: account.id)
+                            }
                         }
                         answered(account.id)
                     case .cancelled:
@@ -381,6 +404,11 @@ public func runBackupPass(
                     await ledger.recordInterruption(localId, for: account.id)
                 }
                 cancelled = true
+            } else if disposition == .landed {
+                for account in wantedBy {
+                    await recordLanded(localId, for: account.id, named: nil, in: ledger)
+                    answered(account.id)
+                }
             } else {
                 for account in wantedBy {
                     await recordProblem(
@@ -400,21 +428,22 @@ public func runBackupPass(
         if unreachable.count == destinations.count { break }
     }
 
-    // A pass that was stopped part-way knows nothing about what it did not reach, and says
-    // so by claiming nothing — and by blaming nobody, because nothing went wrong.
-    if cancelled { return BackupPassOutcome(uploaded: uploaded) }
+    // A pass that was stopped part-way claims no completion. A message it already
+    // owed — sign in, or a server it could not reach — is not wiped on the way out.
+    if cancelled { return BackupPassOutcome(uploaded: uploaded, message: message) }
 
     // The progress reported before each upload names the file being sent, so the last of
     // them is one short. Said once more at the end, so the bar arrives rather than stopping
     // just before the end and vanishing.
     effects.report(BackupProgress(completed: completed, total: total))
 
-    // "Last completed" means something from this destination arrived. A pass that
-    // delivered nothing — deferred, refused, or signed out — must not move it, or
-    // settings says the backup finished. One bad photograph beside a file that did
-    // arrive still stamps, which is the regression ergofobe/imogen-ios#37 shipped
-    // a withheld timestamp for.
-    let complete = destinations.map(\.id).filter { accepted.contains($0) }
+    // "Last completed" is a destination that is up to date, or that took a file
+    // and was still reachable at the end. One that went unreachable or
+    // unauthorised does not get it, even if something arrived first. An
+    // up-to-date destination is stamped even when another destination had work.
+    let complete = destinations.map(\.id).filter { id in
+        !unreachable.contains(id) && ((owed[id] ?? 0) == 0 || accepted.contains(id))
+    }
     await recordCompleted(complete, in: ledger)
     return BackupPassOutcome(
         uploaded: uploaded, completedDestinations: complete, message: message
@@ -426,6 +455,25 @@ private func recordCompleted(_ accountIds: [String], in ledger: UploadLedger) as
     for accountId in accountIds {
         await ledger.recordCompleted(at: now, for: accountId)
     }
+}
+
+private func recordLanded(
+    _ localId: String,
+    for accountId: String,
+    named name: String?,
+    in ledger: UploadLedger
+) async {
+    let existing = await ledger.record(localId, for: accountId)
+    await ledger.put(
+        UploadRecord(
+            localId: localId,
+            attempts: existing?.attempts ?? 0,
+            displayName: name ?? existing?.displayName,
+            landed: true
+        ),
+        for: accountId
+    )
+    await ledger.clearInterruption(localId, for: accountId)
 }
 
 /// A file this destination could not take, on the failures screen where somebody can see

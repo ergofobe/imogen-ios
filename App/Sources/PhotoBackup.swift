@@ -199,6 +199,10 @@ final class PhotoBackup {
     private func send(
         _ file: URL, _ localId: String, _ asset: PHAsset?, to session: Session
     ) async -> Result<String, Error> {
+        // HTTPClient.send throws the same 401 when refresh returned nil and when
+        // it returned a token but did not replay the multipart body. A changed
+        // access token is the only fact on this side of that call.
+        let before = await session.accessToken()
         do {
             let result = try await session.client.assets.upload(
                 file,
@@ -212,6 +216,19 @@ final class PhotoBackup {
             )
             return .success(result.asset.id)
         } catch {
+            if let imogen = error as? ImogenError, imogen.status == 401 {
+                let after = await session.accessToken()
+                if let after, after != before {
+                    return .failure(
+                        ImogenError(
+                            status: 401,
+                            code: refreshedNotReplayed,
+                            message: imogen.message,
+                            details: imogen.details
+                        )
+                    )
+                }
+            }
             return .failure(error)
         }
     }

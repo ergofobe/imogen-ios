@@ -269,4 +269,20 @@ final class UploadLedgerTests: XCTestCase {
         let readBack = await fresh.interruptions(for: "acc")
         XCTAssertEqual(readBack, ["kept": 1])
     }
+
+    func testATornJournalTailDoesNotDropEarlierRecords() async throws {
+        let ledger = self.ledger()
+        await ledger.put(UploadRecord(localId: "a", assetId: "remote-a"), for: "acc")
+        await ledger.put(UploadRecord(localId: "b", assetId: "remote-b"), for: "acc")
+        let journal = directory.appending(path: "uploads-acc.journal")
+        var data = try Data(contentsOf: journal)
+        data.removeLast(8)
+        data.append(0xFF)
+        try data.write(to: journal)
+
+        let fresh = UploadLedger(directory: directory)
+        let records = await fresh.records(for: "acc")
+        XCTAssertEqual(records["a"]?.assetId, "remote-a")
+        XCTAssertNil(records["b"])
+    }
 }
