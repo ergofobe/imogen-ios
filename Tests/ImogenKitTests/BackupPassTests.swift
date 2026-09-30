@@ -435,6 +435,36 @@ final class BackupPassTests: XCTestCase {
         XCTAssertTrue(settled.isEmpty)
     }
 
+    func testAnAuthErrorDoesNotEndTheDestination() async {
+        for status in [401, 403] {
+            let ledger = self.ledger()
+            let world = World()
+            let auth = ImogenError(
+                status: status, code: "unauthorized", message: "Session expired"
+            )
+            world.answers["a"] = .failure(auth)
+
+            let outcome = await runBackupPass(
+                ["a", "b"], to: [account("one")], ledger: ledger, effects: world.effects()
+            )
+
+            // A stale token used to be read as the destination being unreachable, which
+            // stopped the pass after the first file and left the rest of the camera roll
+            // untouched — with no failure row to say why.
+            XCTAssertEqual(world.uploads.map(\.localId), ["a", "b"], "status \(status)")
+            XCTAssertEqual(outcome.uploaded, 1, "status \(status)")
+            XCTAssertEqual(outcome.completedDestinations, ["one"], "status \(status)")
+            XCTAssertNil(outcome.message, "status \(status)")
+            let listed = await ledger.failures(for: "one")
+            XCTAssertEqual(listed.map(\.localId), ["a"], "status \(status)")
+            XCTAssertEqual(listed.first?.lastError, "Session expired", "status \(status)")
+            let attempts = await ledger.attempts("a", for: "one")
+            XCTAssertEqual(attempts, 0, "status \(status)")
+            let interruptions = await ledger.interruptions(for: "one")
+            XCTAssertEqual(interruptions["a"], 1, "status \(status)")
+        }
+    }
+
     // MARK: - One destination's bad day is not another's
 
     func testAnUnreachableDestinationDoesNotStopAHealthyOne() async {
@@ -565,10 +595,10 @@ final class BackupPassTests: XCTestCase {
         XCTAssertNil(outcome.message)
         let attempts = await ledger.attempts("a", for: "one")
         XCTAssertEqual(attempts, 0)
-        // And it is moved out of the way rather than blocking the same queue position on
-        // every pass for ever.
+        // A network failure while exporting is unavailable, not deferred, so it does not
+        // earn an interruption — the same rule the upload-failure arm already follows.
         let interruptions = await ledger.interruptions(for: "one")
-        XCTAssertEqual(interruptions["a"], 1)
+        XCTAssertTrue(interruptions.isEmpty)
     }
 
     func testAnExportFailureKeepsTheNameTheFileAlreadyHad() async {
@@ -728,7 +758,8 @@ final class CancellationShapeTests: XCTestCase {
     func testAStaleTokenIsTheSessionsProblem() {
         for status in [401, 403] {
             let error = ImogenError(status: status, code: "unauthorized", message: "No")
-            XCTAssertEqual(uploadDisposition(of: error), .unavailable)
+            XCTAssertEqual(uploadDisposition(of: error), .deferred)
+            XCTAssertFalse(uploadDisposition(of: error).spendsAttempt)
         }
     }
 }

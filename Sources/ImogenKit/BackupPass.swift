@@ -33,9 +33,9 @@ public enum UploadDisposition: Equatable, Sendable {
     /// expiring overnight, which is routine rather than an error.
     case cancelled
 
-    /// Something local went wrong with this one file — it could not be read off the
-    /// device, the disk is full, the export went missing. Costs the file nothing and the
-    /// destination nothing; it only moves the file out of the queue's way.
+    /// Something that is not this file's settled answer and not a destination outage —
+    /// a local read problem, or a session that will not authorise the upload. Costs the
+    /// file nothing and the destination nothing; it only moves the file out of the queue's way.
     case deferred
 
     /// Whether this costs the file one of its `maxUploadAttempts`, after which
@@ -80,10 +80,11 @@ public func uploadDisposition(of error: Error) -> UploadDisposition {
     }
     if error is ExportFailure { return .rejected }
     guard let imogen = error as? ImogenError else { return .deferred }
-    // A stale token is the session's problem, not the photograph's. Uploads are sent
-    // unreplayable, so the SDK's refresh-and-retry cannot fire and the 401 arrives here —
-    // and spending an attempt on it would give up the whole camera roll in three passes.
-    if imogen.isAuthError { return .unavailable }
+    // A stale token is the session's problem, not the photograph's — and not a destination
+    // outage either. Uploads are sent unreplayable, so the SDK's refresh-and-retry cannot
+    // fire and the 401 arrives here. Deferred so the pass keeps walking, the failures
+    // screen can say so, and three of them do not give up the camera roll.
+    if imogen.isAuthError { return .deferred }
     // Status 0 is the SDK's "the request never reached a server".
     return imogen.isRetryable || imogen.status == 0 ? .unavailable : .rejected
 }
@@ -352,7 +353,9 @@ public func runBackupPass(
                         because: uploadFailureMessage(exportFailure),
                         named: nil, spendingAttempt: disposition.spendsAttempt, in: ledger
                     )
-                    await ledger.recordInterruption(localId, for: account.id)
+                    if disposition == .deferred {
+                        await ledger.recordInterruption(localId, for: account.id)
+                    }
                     answered(account.id)
                 }
             }
